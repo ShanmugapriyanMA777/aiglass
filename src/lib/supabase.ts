@@ -1,7 +1,14 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+const rawUrl = import.meta.env.VITE_SUPABASE_URL as string;
+const rawKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+
+// Fallbacks to prevent crash if environment variables are not set during deployment
+const supabaseUrl = rawUrl && (rawUrl.startsWith('http://') || rawUrl.startsWith('https://'))
+  ? rawUrl
+  : 'https://placeholder-url-for-local-fallback.supabase.co';
+
+const supabaseAnonKey = rawKey || 'placeholder-key-for-local-fallback';
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
