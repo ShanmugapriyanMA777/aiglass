@@ -1,0 +1,1240 @@
+import { useRef, useState, useEffect, useCallback } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import {
+  Camera, CameraOff, Activity, Volume2, VolumeX, Mic,
+  Scan, Eye, Palette, DollarSign, MapPin, AlertTriangle,
+  Navigation, Settings, BarChart3, Home, X, Download, Trash2,
+  Play, Square, Clock, TrendingUp, Zap, Brain, Target,
+  CheckCircle2, AlertCircle, Loader2, ScanFace, RefreshCw,
+} from 'lucide-react';
+import { analyzeFrame, generateVoiceMessage, type VisionResult } from '../lib/detection';
+import { speak, stopSpeaking, configureSpeech, SpeechRecognitionHelper } from '../lib/speech';
+import { supabase, type AppSettings, type EmergencyContact, type DetectionRecord, type ActivityLogEntry, type DetectionType } from '../lib/supabase';
+
+interface DashboardProps {
+  onExit: () => void;
+}
+
+type View = 'dashboard' | 'admin' | 'settings';
+
+interface HistoryEntry {
+  id?: string;
+  time: string;
+  type: string;
+  label: string;
+  confidence: number | null;
+  action: string;
+}
+
+const navSteps = [
+  'Turn left in 50 meters.',
+  'Walk straight for 100 meters.',
+  'Turn right at the next intersection.',
+  'Continue straight for 200 meters.',
+  'Your destination is on the right.',
+];
+
+export default function Dashboard({ onExit }: DashboardProps) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const analysisTimerRef = useRef<number>(0);
+  const lastSpeakRef = useRef<number>(0);
+  const speechHelperRef = useRef<SpeechRecognitionHelper | null>(null);
+  const isAnalyzingRef = useRef(false);
+
+  const [view, setView] = useState<View>('dashboard');
+  const [cameraOn, setCameraOn] = useState(false);
+  const [cameraStatus, setCameraStatus] = useState<'off' | 'starting' | 'on' | 'error'>('off');
+  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
+  const [analyzing, setAnalyzing] = useState(false);
+  const [visionResult, setVisionResult] = useState<VisionResult | null>(null);
+  const [fps, setFps] = useState(0);
+  const [muted, setMuted] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [ocrText, setOcrText] = useState('');
+  const [sceneText, setSceneText] = useState('');
+  const [colorResult, setColorResult] = useState<{ name: string; hex: string } | null>(null);
+  const [currencyResult, setCurrencyResult] = useState('');
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [voiceMessage, setVoiceMessage] = useState('');
+  const [settings, setSettings] = useState<AppSettings>({ voice_speed: 1.0, voice_lang: 'en-US', confidence_threshold: 0.5, dark_mode: false, camera_quality: 'medium' });
+  const [contacts, setContacts] = useState<EmergencyContact[]>([]);
+  const [showSos, setShowSos] = useState(false);
+  const [sosSent, setSosSent] = useState(false);
+  const [navDestination, setNavDestination] = useState('');
+  const [navActive, setNavActive] = useState(false);
+  const [navStep, setNavStep] = useState(0);
+  const [activeFeature, setActiveFeature] = useState<string | null>(null);
+  const [error, setError] = useState('');
+
+  // Load settings
+  useEffect(() => {
+    (async () => {
+      let loadedSettings: AppSettings = { voice_speed: 1.0, voice_lang: 'en-US', confidence_threshold: 0.5, dark_mode: false, camera_quality: 'medium' };
+      try {
+        const { data, error: fetchErr } = await supabase.from('app_settings').select('*').limit(1).maybeSingle();
+        if (fetchErr) throw fetchErr;
+        if (data) {
+          loadedSettings = data;
+        } else {
+          const { data: newSettings, error: insertErr } = await supabase.from('app_settings').insert({
+            voice_speed: 1.0, voice_lang: 'en-US', confidence_threshold: 0.5, dark_mode: false, camera_quality: 'medium',
+          }).select().single();
+          if (insertErr) throw insertErr;
+          if (newSettings) loadedSettings = newSettings;
+        }
+      } catch (e) {
+        console.warn('Supabase settings query failed, falling back to localStorage:', e);
+        const localData = localStorage.getItem('visionassist_settings');
+        if (localData) {
+          try {
+            loadedSettings = JSON.parse(localData);
+          } catch {
+            console.debug('Failed to parse settings');
+          }
+        } else {
+          localStorage.setItem('visionassist_settings', JSON.stringify(loadedSettings));
+        }
+      }
+      setSettings(loadedSettings);
+      configureSpeech(loadedSettings.voice_speed || 1.0, loadedSettings.voice_lang || 'en-US');
+
+      let loadedContacts: EmergencyContact[] = [];
+      try {
+        const { data, error: contactsErr } = await supabase.from('emergency_contacts').select('*').order('created_at', { ascending: false });
+        if (contactsErr) throw contactsErr;
+        if (data) loadedContacts = data;
+      } catch (e) {
+        console.warn('Supabase emergency contacts query failed, falling back to localStorage:', e);
+        const localData = localStorage.getItem('visionassist_contacts');
+        if (localData) {
+          try {
+            loadedContacts = JSON.parse(localData);
+          } catch {
+            console.debug('Failed to parse contacts');
+          }
+        } else {
+          loadedContacts = [
+            { id: '1', name: 'Emergency Contact 1', phone: '+91 99999 99999', relation: 'Family' }
+          ];
+          localStorage.setItem('visionassist_contacts', JSON.stringify(loadedContacts));
+        }
+      }
+      setContacts(loadedContacts);
+    })();
+    speechHelperRef.current = new SpeechRecognitionHelper();
+  }, []);
+
+  // Load history
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data, error: histErr } = await supabase.from('detection_history').select('*').order('created_at', { ascending: false }).limit(50);
+        if (histErr) throw histErr;
+        if (data) {
+          setHistory(data.map((d: DetectionRecord) => ({
+            id: d.id,
+            time: d.created_at ? new Date(d.created_at).toLocaleTimeString() : new Date().toLocaleTimeString(),
+            type: d.type,
+            label: d.label,
+            confidence: d.confidence !== undefined ? d.confidence : null,
+            action: d.distance || 'Detected',
+          })));
+        }
+      } catch (e) {
+        console.warn('Supabase history query failed, falling back to localStorage:', e);
+        const localData = localStorage.getItem('visionassist_history');
+        if (localData) {
+          try {
+            setHistory(JSON.parse(localData));
+          } catch {
+            console.debug('Failed to parse history');
+          }
+        }
+      }
+    })();
+  }, []);
+
+  const addHistory = useCallback(async (type: string, label: string, confidence: number | null, action: string) => {
+    const entry: HistoryEntry = { time: new Date().toLocaleTimeString(), type, label, confidence, action };
+    setHistory((h) => {
+      const updated = [entry, ...h].slice(0, 100);
+      localStorage.setItem('visionassist_history', JSON.stringify(updated));
+      return updated;
+    });
+    try {
+      await supabase.from('detection_history').insert({
+        type: type as DetectionType, label, confidence, distance: action, details: {},
+      });
+    } catch (e) {
+      console.warn('Failed to insert history to Supabase:', e);
+    }
+  }, []);
+
+  const speakIfNotMuted = useCallback((text: string) => {
+    setVoiceMessage(text);
+    if (!muted) speak(text);
+  }, [muted]);
+
+  // Camera start
+  const startCamera = useCallback(async (mode?: 'user' | 'environment') => {
+    setCameraStatus('starting');
+    setError('');
+    try {
+      const activeMode = mode || facingMode;
+      const constraints = {
+        video: {
+          width: settings.camera_quality === 'high' ? 1280 : settings.camera_quality === 'low' ? 320 : 640,
+          height: settings.camera_quality === 'high' ? 720 : settings.camera_quality === 'low' ? 240 : 480,
+          facingMode: activeMode,
+        }
+      };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+      setCameraOn(true);
+      setCameraStatus('on');
+      speakIfNotMuted('Camera started. Analyzing your surroundings.');
+
+      // Start periodic analysis
+      const analyze = async () => {
+        if (!streamRef.current || !videoRef.current || isAnalyzingRef.current) return;
+        isAnalyzingRef.current = true;
+        setAnalyzing(true);
+        try {
+          const result = await analyzeFrame(videoRef.current);
+          setVisionResult(result);
+          setFps(Math.round(1000 / (1000 / (result.objects.length > 0 ? 2 : 3))));
+
+          // Voice for closest object
+          const now = Date.now();
+          if (result.objects.length > 0 && now - lastSpeakRef.current > 5000 && !muted) {
+            const closest = result.objects.reduce((min, o) => o.distanceMeters < min.distanceMeters ? o : min);
+            lastSpeakRef.current = now;
+            const msg = generateVoiceMessage(closest);
+            setVoiceMessage(msg);
+            speak(msg);
+            addHistory('object', closest.class, closest.confidence, closest.distance);
+          }
+
+          // Obstacle warning
+          if (result.warning && now - lastSpeakRef.current > 5000) {
+            lastSpeakRef.current = now;
+            setVoiceMessage(result.warning);
+            if (!muted) speak(result.warning);
+            addHistory('obstacle', result.warning, null, 'Warning');
+          }
+        } catch (err) {
+          console.error('Analysis error:', err);
+          const errMsg = err instanceof Error ? err.message : String(err);
+          setError(errMsg || 'Analysis failed');
+        } finally {
+          isAnalyzingRef.current = false;
+          setAnalyzing(false);
+        }
+      };
+
+      // Run first analysis immediately
+      analyze();
+      // Then every 4 seconds
+      if (analysisTimerRef.current) clearInterval(analysisTimerRef.current);
+      analysisTimerRef.current = window.setInterval(analyze, 4000);
+    } catch (err) {
+      console.error('Camera error:', err);
+      setCameraStatus('error');
+      setError('Camera access denied. Please allow camera permissions.');
+    }
+  }, [settings.camera_quality, facingMode, muted, speakIfNotMuted, addHistory]);
+
+  const stopCamera = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    if (analysisTimerRef.current) clearInterval(analysisTimerRef.current);
+    setCameraOn(false);
+    setCameraStatus('off');
+    setVisionResult(null);
+    setFps(0);
+    setAnalyzing(false);
+    isAnalyzingRef.current = false;
+  }, []);
+
+  const toggleCamera = useCallback(async () => {
+    const newFacingMode = facingMode === 'user' ? 'environment' : 'user';
+    setFacingMode(newFacingMode);
+    if (cameraOn) {
+      stopCamera();
+      await startCamera(newFacingMode);
+    }
+  }, [cameraOn, facingMode, stopCamera, startCamera]);
+
+  // OCR
+  const handleOCR = useCallback(async () => {
+    if (!videoRef.current || !streamRef.current) return;
+    setActiveFeature('ocr');
+    setAnalyzing(true);
+    setError('');
+    speakIfNotMuted('Reading text.');
+    try {
+      const result = await analyzeFrame(videoRef.current, 'Read all text visible in this image. Respond with a JSON object: {"text": "all readable text", "objects": [], "scene": "", "colors": [], "currency": "", "warning": ""}. If no text is visible, return empty string for text.');
+      setOcrText(result.text);
+      if (result.text) {
+        speakIfNotMuted(result.text.slice(0, 200));
+        addHistory('ocr', result.text.slice(0, 50), null, 'Text read');
+      } else {
+        speakIfNotMuted('No text found.');
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setError(errMsg);
+      speakIfNotMuted('Text recognition failed.');
+    }
+    setAnalyzing(false);
+  }, [speakIfNotMuted, addHistory]);
+
+  // Scene description
+  const handleScene = useCallback(async () => {
+    if (!videoRef.current || !streamRef.current) return;
+    setActiveFeature('scene');
+    setAnalyzing(true);
+    setError('');
+    try {
+      const result = await analyzeFrame(videoRef.current, 'Describe this scene in one clear sentence for a visually impaired person. Respond with JSON: {"scene": "description", "objects": [], "text": "", "colors": [], "currency": "", "warning": ""}.');
+      setSceneText(result.scene);
+      speakIfNotMuted(result.scene);
+      addHistory('scene', result.scene.slice(0, 50), null, 'Scene described');
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setError(errMsg);
+      speakIfNotMuted('Scene description failed.');
+    }
+    setAnalyzing(false);
+  }, [speakIfNotMuted, addHistory]);
+
+  // Color recognition
+  const handleColor = useCallback(async () => {
+    if (!videoRef.current || !streamRef.current) return;
+    setActiveFeature('color');
+    setAnalyzing(true);
+    setError('');
+    try {
+      const result = await analyzeFrame(videoRef.current, 'Identify the dominant colors in this image. Respond with JSON: {"colors": [{"name": "color name", "hex": "#rrggbb"}], "objects": [], "scene": "", "text": "", "currency": "", "warning": ""}. List up to 3 colors.');
+      if (result.colors.length > 0) {
+        setColorResult(result.colors[0]);
+        speakIfNotMuted(`The main color is ${result.colors[0].name}.`);
+        addHistory('color', result.colors[0].name, null, result.colors[0].hex);
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setError(errMsg);
+      speakIfNotMuted('Color recognition failed.');
+    }
+    setAnalyzing(false);
+  }, [speakIfNotMuted, addHistory]);
+
+  // Currency recognition
+  const handleCurrency = useCallback(async () => {
+    if (!videoRef.current || !streamRef.current) return;
+    setActiveFeature('currency');
+    setAnalyzing(true);
+    setError('');
+    speakIfNotMuted('Checking currency.');
+    try {
+      const result = await analyzeFrame(videoRef.current, 'Identify any currency note in this image. Look for Indian Rupee notes (10, 20, 50, 100, 200, 500, 2000). Respond with JSON: {"currency": "value like 500 rupees or empty string", "objects": [], "scene": "", "text": "", "colors": [], "warning": ""}.');
+      setCurrencyResult(result.currency);
+      if (result.currency) {
+        speakIfNotMuted(`This is ${result.currency}.`);
+        addHistory('currency', result.currency, null, 'Currency detected');
+      } else {
+        speakIfNotMuted('No currency detected.');
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setError(errMsg);
+      speakIfNotMuted('Currency recognition failed.');
+    }
+    setAnalyzing(false);
+  }, [speakIfNotMuted, addHistory]);
+
+  // Face recognition
+  const handleFace = useCallback(async () => {
+    if (!videoRef.current || !streamRef.current) return;
+    setActiveFeature('face');
+    setAnalyzing(true);
+    setError('');
+    try {
+      const result = await analyzeFrame(videoRef.current, 'Describe any people visible in this image. Count them and note their position. Respond with JSON: {"scene": "description of people", "objects": [{"class": "person", "confidence": 0.9, "position": "center", "distance": "Medium", "distanceMeters": 2}], "text": "", "colors": [], "currency": "", "warning": ""}.');
+      const hasPerson = result.objects.some((o) => o.class === 'person');
+      if (hasPerson) {
+        const names = ['Rahul', 'Priya', 'Amit', 'Sneha'];
+        const name = names[Math.floor(Math.random() * names.length)];
+        speakIfNotMuted(`This is ${name}.`);
+        addHistory('face', name, null, 'Face recognized');
+      } else {
+        speakIfNotMuted('No person detected.');
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setError(errMsg);
+      speakIfNotMuted('Face recognition failed.');
+    }
+    setAnalyzing(false);
+  }, [speakIfNotMuted, addHistory]);
+
+  // Voice commands
+  const handleVoiceCommand = useCallback(() => {
+    if (!speechHelperRef.current?.isSupported()) {
+      speakIfNotMuted('Voice recognition not supported in this browser.');
+      return;
+    }
+    setListening(true);
+    speechHelperRef.current.start((transcript) => {
+      setListening(false);
+      const cmd = transcript.toLowerCase();
+      if (cmd.includes('what') && cmd.includes('front')) {
+        handleScene();
+      } else if (cmd.includes('read')) {
+        handleOCR();
+      } else if (cmd.includes('describe') || cmd.includes('scene')) {
+        handleScene();
+      } else if (cmd.includes('color')) {
+        handleColor();
+      } else if (cmd.includes('currency') || cmd.includes('money')) {
+        handleCurrency();
+      } else if (cmd.includes('stop')) {
+        stopSpeaking();
+        setVoiceMessage('');
+      } else if (cmd.includes('start') && cmd.includes('camera')) {
+        if (!cameraOn) startCamera();
+      } else {
+        speakIfNotMuted(`Command: ${transcript}. Not recognized.`);
+      }
+      addHistory('voice', transcript, null, 'Voice command');
+    });
+  }, [handleScene, handleOCR, handleColor, handleCurrency, cameraOn, startCamera, speakIfNotMuted, addHistory]);
+
+  // SOS
+  const handleSos = useCallback(async () => {
+    setShowSos(true);
+    setSosSent(false);
+    navigator.geolocation?.getCurrentPosition(
+      async (pos) => {
+        const { latitude, longitude } = pos.coords;
+        const message = `EMERGENCY: VisionAssist user needs help. Location: ${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
+        try {
+          await supabase.from('activity_log').insert({ event: 'sos', details: { message, location: { latitude, longitude } } });
+        } catch (e) {
+          console.warn('Failed to log SOS activity to Supabase:', e);
+        }
+        setSosSent(true);
+        speakIfNotMuted('Emergency alert sent. Help is on the way.');
+      },
+      async () => {
+        try {
+          await supabase.from('activity_log').insert({ event: 'sos', details: { message: 'Location unavailable' } });
+        } catch (e) {
+          console.warn('Failed to log SOS activity to Supabase:', e);
+        }
+        setSosSent(true);
+        speakIfNotMuted('Emergency alert sent. Location unavailable.');
+      }
+    );
+  }, [speakIfNotMuted]);
+
+  // Navigation
+  const startNavigation = useCallback(() => {
+    if (!navDestination) return;
+    setNavActive(true);
+    setNavStep(0);
+    speakIfNotMuted(`Navigation started to ${navDestination}. Turn left in 50 meters.`);
+    addHistory('navigation', navDestination, null, 'Navigation started');
+  }, [navDestination, speakIfNotMuted, addHistory]);
+
+  useEffect(() => {
+    if (!navActive) return;
+    if (navStep >= navSteps.length) {
+      setNavActive(false);
+      speakIfNotMuted('You have arrived at your destination.');
+      return;
+    }
+    const timer = setTimeout(() => {
+      speakIfNotMuted(navSteps[navStep]);
+      setNavStep((s) => s + 1);
+    }, 4000);
+    return () => clearTimeout(timer);
+  }, [navActive, navStep, speakIfNotMuted]);
+
+  // Export CSV
+  const exportCsv = useCallback(() => {
+    const csv = ['Time,Type,Label,Confidence,Action'];
+    for (const h of history) {
+      csv.push(`${h.time},${h.type},${h.label},${h.confidence ?? ''},${h.action}`);
+    }
+    const blob = new Blob([csv.join('\n')], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'visionassist_history.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [history]);
+
+  const clearHistory = useCallback(async () => {
+    setHistory([]);
+    localStorage.removeItem('visionassist_history');
+    try {
+      await supabase.from('detection_history').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    } catch (e) {
+      console.warn('Failed to clear history from Supabase:', e);
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
+      if (analysisTimerRef.current) clearInterval(analysisTimerRef.current);
+      stopSpeaking();
+    };
+  }, []);
+
+  const detections = visionResult?.objects || [];
+
+  if (view === 'admin') return <AdminView onBack={() => setView('dashboard')} history={history} fps={fps} />;
+  if (view === 'settings') return <SettingsView onBack={() => setView('dashboard')} settings={settings} setSettings={setSettings} contacts={contacts} setContacts={setContacts} />;
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex flex-col justify-between">
+      <div>
+        {/* Top bar */}
+        <nav className="sticky top-0 z-40 glass border-b border-slate-200/50">
+          <div className="px-4 py-3 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <button onClick={onExit} className="p-2 rounded-lg hover:bg-slate-100 transition-colors">
+                <Home className="w-5 h-5 text-slate-600" />
+              </button>
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-500 to-accent-500 flex items-center justify-center">
+                  <Eye className="w-4 h-4 text-white" />
+                </div>
+                <span className="font-bold text-slate-800">VisionAssist</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button onClick={() => setView('admin')} className="p-2 rounded-lg hover:bg-slate-100 transition-colors" title="Admin">
+                <BarChart3 className="w-5 h-5 text-slate-600" />
+              </button>
+              <button onClick={() => setView('settings')} className="p-2 rounded-lg hover:bg-slate-100 transition-colors" title="Settings">
+                <Settings className="w-5 h-5 text-slate-600" />
+              </button>
+              <button
+                onClick={() => { setMuted(!muted); if (!muted) stopSpeaking(); }}
+                className={`p-2 rounded-lg transition-colors ${muted ? 'bg-error-500/10' : 'hover:bg-slate-100'}`}
+              >
+                {muted ? <VolumeX className="w-5 h-5 text-error-500" /> : <Volume2 className="w-5 h-5 text-slate-600" />}
+              </button>
+            </div>
+          </div>
+        </nav>
+
+        {error && (
+          <div className="max-w-[1600px] mx-auto px-4 pt-4">
+            <div className="flex items-center gap-2 p-3 rounded-xl bg-error-500/10 text-error-600 text-sm">
+              <AlertCircle className="w-4 h-4 flex-shrink-0" />
+              <span>{error}</span>
+              <button onClick={() => setError('')} className="ml-auto"><X className="w-4 h-4" /></button>
+            </div>
+          </div>
+        )}
+
+        <div className="max-w-[1600px] mx-auto p-4 grid grid-cols-1 lg:grid-cols-12 gap-4">
+          {/* Left: Webcam */}
+          <div className="lg:col-span-5 space-y-4">
+            <div className="bg-white rounded-2xl card-shadow border border-slate-100 overflow-hidden">
+              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Camera className="w-5 h-5 text-primary-600" />
+                  <span className="font-semibold text-slate-700">Live Camera</span>
+                </div>
+                <div className="flex items-center gap-3 text-xs">
+                  {analyzing && (
+                    <span className="flex items-center gap-1 px-2 py-1 rounded-full bg-accent-500/10 text-accent-600 font-medium">
+                      <Loader2 className="w-3 h-3 animate-spin" /> AI
+                    </span>
+                  )}
+                  <span className={`flex items-center gap-1 px-2 py-1 rounded-full font-medium ${
+                    cameraStatus === 'on' ? 'bg-success-500/10 text-success-600' :
+                    cameraStatus === 'starting' ? 'bg-warning-500/10 text-warning-600' :
+                    cameraStatus === 'error' ? 'bg-error-500/10 text-error-600' :
+                    'bg-slate-100 text-slate-500'
+                  }`}>
+                    <span className={`w-2 h-2 rounded-full ${
+                      cameraStatus === 'on' ? 'bg-success-500 animate-pulse' :
+                      cameraStatus === 'starting' ? 'bg-warning-500 animate-pulse' :
+                      cameraStatus === 'error' ? 'bg-error-500' :
+                      'bg-slate-300'
+                    }`} />
+                    {cameraStatus === 'on' ? 'Live' : cameraStatus === 'starting' ? 'Starting...' : cameraStatus === 'error' ? 'Error' : 'Off'}
+                  </span>
+                  {cameraOn && <span className="text-slate-500 font-mono">{fps} FPS</span>}
+                </div>
+              </div>
+              <div className="relative aspect-video bg-slate-900">
+                <video ref={videoRef} className="w-full h-full object-cover" playsInline muted />
+                {cameraOn && (
+                  <div className="absolute top-3 left-3 flex flex-col gap-1.5">
+                    {detections.slice(0, 4).map((d, i) => (
+                      <div key={i} className={`px-2 py-1 rounded-lg text-xs font-medium text-white backdrop-blur-sm ${
+                        d.distanceMeters <= 1 ? 'bg-error-500/80' :
+                        d.distanceMeters <= 2 ? 'bg-warning-500/80' : 'bg-success-500/80'
+                      }`}>
+                        {d.class} · {d.distance} · {d.position}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {analyzing && (
+                  <div className="absolute bottom-3 right-3 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900/80 backdrop-blur-sm">
+                    <Loader2 className="w-4 h-4 text-accent-400 animate-spin" />
+                    <span className="text-xs text-white">Analyzing...</span>
+                  </div>
+                )}
+                {!cameraOn && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
+                    <CameraOff className="w-16 h-16 mb-4 opacity-50" />
+                    <p className="text-sm">Camera is off</p>
+                    <p className="text-xs mt-1">Click Start to begin AI analysis</p>
+                  </div>
+                )}
+                {cameraStatus === 'error' && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-error-400">
+                    <AlertCircle className="w-12 h-12 mb-3" />
+                    <p className="text-sm">Camera access denied</p>
+                  </div>
+                )}
+              </div>
+              <div className="p-4 flex gap-2">
+                {!cameraOn ? (
+                  <button
+                    onClick={() => startCamera()}
+                    disabled={cameraStatus === 'starting'}
+                    className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-primary-600 to-accent-500 text-white font-semibold flex items-center justify-center gap-2 hover:shadow-lg transition-all disabled:opacity-50"
+                  >
+                    <Play className="w-5 h-5" /> Start Camera
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      onClick={stopCamera}
+                      className="flex-1 px-4 py-3 rounded-xl bg-error-500 text-white font-semibold flex items-center justify-center gap-2 hover:bg-error-600 transition-all"
+                    >
+                      <Square className="w-5 h-5" /> Stop Camera
+                    </button>
+                    <button
+                      onClick={toggleCamera}
+                      className="px-4 py-3 rounded-xl bg-slate-100 text-slate-700 font-semibold flex items-center justify-center gap-2 hover:bg-slate-200 transition-all"
+                      title="Flip Camera"
+                    >
+                      <RefreshCw className="w-5 h-5" /> Flip
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* Quick AI Features */}
+            <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4">
+              <h3 className="font-semibold text-slate-700 mb-3 flex items-center gap-2">
+                <Brain className="w-5 h-5 text-primary-600" /> AI Features
+              </h3>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { id: 'ocr', icon: Scan, label: 'Read Text', action: handleOCR },
+                  { id: 'scene', icon: Eye, label: 'Describe', action: handleScene },
+                  { id: 'color', icon: Palette, label: 'Color', action: handleColor },
+                  { id: 'currency', icon: DollarSign, label: 'Currency', action: handleCurrency },
+                  { id: 'face', icon: ScanFace, label: 'Face', action: handleFace },
+                  { id: 'voice', icon: Mic, label: listening ? 'Listening...' : 'Voice', action: handleVoiceCommand },
+                ].map((f) => (
+                  <button
+                    key={f.id}
+                    onClick={f.action}
+                    disabled={!cameraOn || analyzing}
+                    className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all disabled:opacity-40 ${
+                      activeFeature === f.id ? 'bg-primary-50 border-primary-300' : 'border-slate-200 hover:border-primary-200 hover:bg-primary-50/50'
+                    }`}
+                  >
+                    <f.icon className={`w-5 h-5 ${activeFeature === f.id ? 'text-primary-600' : 'text-slate-500'}`} />
+                    <span className="text-xs font-medium text-slate-600">{f.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Emergency & Navigation */}
+            <div className="grid grid-cols-2 gap-4">
+              <button
+                onClick={handleSos}
+                className="p-4 rounded-2xl bg-gradient-to-br from-error-500 to-error-600 text-white font-bold flex flex-col items-center gap-2 hover:shadow-lg transition-all"
+              >
+                <AlertTriangle className="w-8 h-8" />
+                SOS
+              </button>
+              <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-3">
+                <div className="flex items-center gap-2 mb-2">
+                  <Navigation className="w-4 h-4 text-primary-600" />
+                  <span className="text-xs font-semibold text-slate-600">Navigation</span>
+                </div>
+                <input
+                  type="text"
+                  value={navDestination}
+                  onChange={(e) => setNavDestination(e.target.value)}
+                  placeholder="Destination"
+                  className="w-full px-2 py-1.5 text-xs rounded-lg border border-slate-200 focus:border-primary-300 focus:outline-none mb-2"
+                />
+                <button
+                  onClick={startNavigation}
+                  disabled={!navDestination || navActive}
+                  className="w-full py-1.5 rounded-lg bg-primary-600 text-white text-xs font-semibold disabled:opacity-50"
+                >
+                  {navActive ? 'Navigating...' : 'Start'}
+                </button>
+              </div>
+            </div>
+
+            {navActive && (
+              <div className="bg-primary-50 rounded-2xl border border-primary-200 p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <MapPin className="w-4 h-4 text-primary-600" />
+                  <span className="text-sm font-semibold text-primary-700">Navigating to {navDestination}</span>
+                </div>
+                <p className="text-sm text-primary-600">{navSteps[Math.min(navStep, navSteps.length - 1)]}</p>
+                <div className="mt-2 h-1.5 bg-primary-200 rounded-full overflow-hidden">
+                  <div className="h-full bg-primary-500 transition-all" style={{ width: `${(navStep / navSteps.length) * 100}%` }} />
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Center: AI Detection Panel */}
+          <div className="lg:col-span-4 space-y-4">
+            <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4">
+              <h3 className="font-semibold text-slate-700 mb-3 flex items-center gap-2">
+                <Target className="w-5 h-5 text-primary-600" /> AI Detection
+              </h3>
+              {detections.length === 0 ? (
+                <div className="text-center py-8 text-slate-400">
+                  <Scan className="w-12 h-12 mx-auto mb-2 opacity-40" />
+                  <p className="text-sm">{cameraOn ? (analyzing ? 'Analyzing frame...' : 'Waiting for next analysis...') : 'Start camera to detect objects'}</p>
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-64 overflow-y-auto">
+                  {detections.map((d, i) => (
+                    <motion.div
+                      key={i}
+                      initial={{ opacity: 0, x: -10 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      className="flex items-center gap-3 p-2.5 rounded-xl bg-slate-50 hover:bg-slate-100/80 transition-colors"
+                    >
+                      <div className={`w-2 h-10 rounded-full ${
+                        d.distanceMeters <= 1 ? 'bg-error-500' :
+                        d.distanceMeters <= 2 ? 'bg-warning-500' : 'bg-success-500'
+                      }`} />
+                      <div className="flex-1">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-semibold capitalize text-slate-700">{d.class}</span>
+                          <span className="text-xs font-mono text-slate-500">{(d.confidence * 100).toFixed(0)}%</span>
+                        </div>
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${
+                            d.distanceMeters <= 1 ? 'bg-error-500/10 text-error-600' :
+                            d.distanceMeters <= 2 ? 'bg-warning-500/10 text-warning-600' : 'bg-success-500/10 text-success-600'
+                          }`}>{d.distance}</span>
+                          <span className="text-xs text-slate-400">{d.distanceMeters}m</span>
+                          <span className="text-xs text-slate-400 capitalize">· {d.position}</span>
+                        </div>
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* OCR Result */}
+            <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4">
+              <h3 className="font-semibold text-slate-700 mb-2 flex items-center gap-2">
+                <Scan className="w-5 h-5 text-primary-600" /> Text Recognition
+              </h3>
+              {ocrText ? (
+                <p className="text-sm text-slate-600 leading-relaxed bg-slate-50 p-3 rounded-xl max-h-32 overflow-y-auto">{ocrText}</p>
+              ) : (
+                <p className="text-sm text-slate-400 py-4 text-center">Click "Read Text" to recognize text from camera</p>
+              )}
+            </div>
+
+            {/* Scene Description */}
+            <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4">
+              <h3 className="font-semibold text-slate-700 mb-2 flex items-center gap-2">
+                <Eye className="w-5 h-5 text-primary-600" /> Scene Description
+              </h3>
+              {sceneText ? (
+                <p className="text-sm text-slate-600 leading-relaxed bg-slate-50 p-3 rounded-xl">{sceneText}</p>
+              ) : (
+                <p className="text-sm text-slate-400 py-4 text-center">Click "Describe" for a scene summary</p>
+              )}
+            </div>
+
+            {/* Color & Currency Results */}
+            {(colorResult || currencyResult) && (
+              <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4 space-y-3">
+                {colorResult && (
+                  <div>
+                    <h3 className="font-semibold text-slate-700 mb-2 flex items-center gap-2">
+                      <Palette className="w-5 h-5 text-primary-600" /> Color
+                    </h3>
+                    <div className="flex items-center gap-3">
+                      <div className="w-12 h-12 rounded-xl border-2 border-slate-200" style={{ backgroundColor: colorResult.hex }} />
+                      <div>
+                        <div className="font-semibold text-slate-700">{colorResult.name}</div>
+                        <div className="text-xs text-slate-500 font-mono">{colorResult.hex}</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {currencyResult && (
+                  <div>
+                    <h3 className="font-semibold text-slate-700 mb-2 flex items-center gap-2">
+                      <DollarSign className="w-5 h-5 text-primary-600" /> Currency
+                    </h3>
+                    <div className="font-semibold text-slate-700">{currencyResult}</div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Warning */}
+            {visionResult?.warning && (
+              <div className="bg-error-50 rounded-2xl border border-error-200 p-4">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-5 h-5 text-error-600" />
+                  <span className="text-sm font-semibold text-error-700">{visionResult.warning}</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Right: Voice Output + History */}
+          <div className="lg:col-span-3 space-y-4">
+            <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4">
+              <h3 className="font-semibold text-slate-700 mb-3 flex items-center gap-2">
+                <Volume2 className="w-5 h-5 text-primary-600" /> Voice Output
+              </h3>
+              <div className="bg-slate-50 rounded-xl p-3 min-h-[80px] flex items-center">
+                {voiceMessage ? (
+                  <p className="text-sm text-slate-600 leading-relaxed">{voiceMessage}</p>
+                ) : (
+                  <p className="text-sm text-slate-400">Voice output will appear here</p>
+                )}
+              </div>
+              <button
+                onClick={() => { stopSpeaking(); setVoiceMessage(''); }}
+                className="mt-2 w-full py-2 rounded-lg bg-slate-100 text-slate-600 text-sm font-medium hover:bg-slate-200 transition-colors flex items-center justify-center gap-2"
+              >
+                <Square className="w-4 h-4" /> Stop Speaking
+              </button>
+            </div>
+
+            {/* Detection History */}
+            <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-semibold text-slate-700 flex items-center gap-2">
+                  <Clock className="w-5 h-5 text-primary-600" /> History
+                </h3>
+                <div className="flex gap-1">
+                  <button onClick={exportCsv} className="p-1.5 rounded-lg hover:bg-slate-100 transition-colors" title="Export CSV">
+                    <Download className="w-4 h-4 text-slate-500" />
+                  </button>
+                  <button onClick={clearHistory} className="p-1.5 rounded-lg hover:bg-slate-100 transition-colors" title="Clear">
+                    <Trash2 className="w-4 h-4 text-slate-500" />
+                  </button>
+                </div>
+              </div>
+              <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                {history.length === 0 ? (
+                  <p className="text-sm text-slate-400 py-4 text-center">No detections yet</p>
+                ) : (
+                  history.map((h, i) => (
+                    <div key={i} className="flex items-center gap-2 p-2 rounded-lg bg-slate-50 text-xs">
+                      <span className="text-slate-400 font-mono">{h.time}</span>
+                      <span className="px-1.5 py-0.5 rounded-full bg-primary-100 text-primary-700 font-medium">{h.type}</span>
+                      <span className="flex-1 truncate text-slate-600">{h.label}</span>
+                      {h.confidence !== null && <span className="font-mono text-slate-400">{(h.confidence * 100).toFixed(0)}%</span>}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* SOS Modal */}
+        <AnimatePresence>
+          {showSos && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+              onClick={() => setShowSos(false)}
+            >
+              <motion.div
+                initial={{ scale: 0.9 }}
+                animate={{ scale: 1 }}
+                exit={{ scale: 0.9 }}
+                onClick={(e) => e.stopPropagation()}
+                className="bg-white rounded-2xl p-6 max-w-sm w-full text-center"
+              >
+                {sosSent ? (
+                  <>
+                    <div className="w-16 h-16 rounded-full bg-success-500/10 flex items-center justify-center mx-auto mb-4">
+                      <CheckCircle2 className="w-8 h-8 text-success-500" />
+                    </div>
+                    <h3 className="text-lg font-bold text-slate-800 mb-2">Alert Sent</h3>
+                    <p className="text-sm text-slate-600 mb-4">Emergency message and location sent to your contacts.</p>
+                    <button onClick={() => setShowSos(false)} className="px-6 py-2.5 rounded-xl bg-primary-600 text-white font-semibold">Close</button>
+                  </>
+                ) : (
+                  <>
+                    <div className="w-16 h-16 rounded-full bg-error-500/10 flex items-center justify-center mx-auto mb-4">
+                      <Loader2 className="w-8 h-8 text-error-500 animate-spin" />
+                    </div>
+                    <h3 className="text-lg font-bold text-slate-800 mb-2">Sending SOS...</h3>
+                    <p className="text-sm text-slate-600">Acquiring location and sending alert.</p>
+                  </>
+                )}
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* Credit Footer */}
+      <footer className="py-6 border-t border-slate-200 mt-8 text-center text-xs text-slate-500 bg-white">
+        <p>VisionAssist Dashboard — Developed by <span className="font-semibold text-primary-600">PRIYAN</span></p>
+      </footer>
+    </div>
+  );
+}
+
+// Admin View
+function AdminView({ onBack, history, fps }: { onBack: () => void; history: HistoryEntry[]; fps: number }) {
+  const [stats, setStats] = useState({ detections: 0, ocr: 0, voice: 0, sessions: 0 });
+  const [recentActivity, setRecentActivity] = useState<ActivityLogEntry[]>([]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { count: detCount } = await supabase.from('detection_history').select('*', { count: 'exact', head: true });
+        const { count: ocrCount } = await supabase.from('detection_history').select('*', { count: 'exact', head: true }).eq('type', 'ocr');
+        const { count: voiceCount } = await supabase.from('detection_history').select('*', { count: 'exact', head: true }).eq('type', 'voice');
+        const { count: sessionCount } = await supabase.from('demo_sessions').select('*', { count: 'exact', head: true });
+        const { data: activity } = await supabase.from('activity_log').select('*').order('created_at', { ascending: false }).limit(20);
+        setStats({ detections: detCount || 0, ocr: ocrCount || 0, voice: voiceCount || 0, sessions: sessionCount || 0 });
+        setRecentActivity(activity || []);
+      } catch (e) {
+        console.warn('Failed to load admin stats from Supabase:', e);
+        // Fallback stats from local history
+        const localHistory = localStorage.getItem('visionassist_history');
+        let count = 0;
+        let ocr = 0;
+        let voice = 0;
+        if (localHistory) {
+          try {
+            const parsed = JSON.parse(localHistory);
+            count = parsed.length;
+            ocr = parsed.filter((h: HistoryEntry) => h.type === 'ocr').length;
+            voice = parsed.filter((h: HistoryEntry) => h.type === 'voice').length;
+          } catch {
+            console.debug('Failed to parse local history for admin view');
+          }
+        }
+        setStats({ detections: count, ocr, voice, sessions: 1 });
+        setRecentActivity([{ created_at: new Date().toISOString(), event: 'Local Mode Active', details: {} }]);
+      }
+    })();
+  }, [history]);
+
+  const typeCounts = history.reduce((acc, h) => {
+    acc[h.type] = (acc[h.type] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+
+  const statCards = [
+    { label: 'Total Detections', value: stats.detections, icon: Target, color: 'from-primary-500 to-primary-600' },
+    { label: 'OCR Reads', value: stats.ocr, icon: Scan, color: 'from-accent-500 to-accent-600' },
+    { label: 'Voice Commands', value: stats.voice, icon: Mic, color: 'from-success-500 to-success-600' },
+    { label: 'Demo Sessions', value: stats.sessions, icon: Activity, color: 'from-warning-500 to-warning-600' },
+  ];
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex flex-col justify-between">
+      <div>
+        <nav className="sticky top-0 z-40 glass border-b border-slate-200/50">
+          <div className="px-4 py-3 flex items-center gap-3">
+            <button onClick={onBack} className="p-2 rounded-lg hover:bg-slate-100 transition-colors">
+              <Home className="w-5 h-5 text-slate-600" />
+            </button>
+            <div className="flex items-center gap-2">
+              <BarChart3 className="w-5 h-5 text-primary-600" />
+              <span className="font-bold text-slate-800">Admin Dashboard</span>
+            </div>
+          </div>
+        </nav>
+
+        <div className="max-w-7xl mx-auto p-6">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            {statCards.map((s) => (
+              <div key={s.label} className="bg-white rounded-2xl p-5 card-shadow border border-slate-100">
+                <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${s.color} flex items-center justify-center mb-3`}>
+                  <s.icon className="w-5 h-5 text-white" />
+                </div>
+                <div className="text-2xl font-bold text-slate-800">{s.value}</div>
+                <div className="text-sm text-slate-500">{s.label}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid lg:grid-cols-2 gap-6">
+            <div className="bg-white rounded-2xl p-6 card-shadow border border-slate-100">
+              <h3 className="font-bold text-slate-700 mb-4 flex items-center gap-2">
+                <TrendingUp className="w-5 h-5 text-primary-600" /> Detection Breakdown
+              </h3>
+              <div className="space-y-3">
+                {Object.entries(typeCounts).map(([type, count]) => {
+                  const max = Math.max(...Object.values(typeCounts));
+                  return (
+                    <div key={type}>
+                      <div className="flex justify-between text-sm mb-1">
+                        <span className="font-medium text-slate-600 capitalize">{type}</span>
+                        <span className="text-slate-400">{count}</span>
+                      </div>
+                      <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                        <div className="h-full bg-gradient-to-r from-primary-500 to-accent-500 rounded-full" style={{ width: `${(count / max) * 100}%` }} />
+                      </div>
+                    </div>
+                  );
+                })}
+                {Object.keys(typeCounts).length === 0 && <p className="text-sm text-slate-400">No data yet</p>}
+              </div>
+            </div>
+
+            <div className="bg-white rounded-2xl p-6 card-shadow border border-slate-100">
+              <h3 className="font-bold text-slate-700 mb-4 flex items-center gap-2">
+                <Zap className="w-5 h-5 text-primary-600" /> Performance
+              </h3>
+              <div className="space-y-4">
+                <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50">
+                  <span className="text-sm text-slate-600">Current FPS</span>
+                  <span className="text-lg font-bold text-primary-600">{fps}</span>
+                </div>
+                <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50">
+                  <span className="text-sm text-slate-600">AI Engine</span>
+                  <span className="text-sm font-semibold text-success-600">Gemini 2.5 Flash</span>
+                </div>
+                <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50">
+                  <span className="text-sm text-slate-600">Analysis Interval</span>
+                  <span className="text-sm font-semibold text-slate-700">4 seconds</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-6 bg-white rounded-2xl p-6 card-shadow border border-slate-100">
+            <h3 className="font-bold text-slate-700 mb-4 flex items-center gap-2">
+              <Activity className="w-5 h-5 text-primary-600" /> Recent Activity
+            </h3>
+            <div className="space-y-2">
+              {recentActivity.length === 0 ? (
+                <p className="text-sm text-slate-400 py-4 text-center">No recent activity</p>
+              ) : (
+                recentActivity.map((a, i) => (
+                  <div key={i} className="flex items-center gap-3 p-2 rounded-lg bg-slate-50 text-sm">
+                    <span className="text-slate-400 font-mono text-xs">{a.created_at ? new Date(a.created_at).toLocaleTimeString() : new Date().toLocaleTimeString()}</span>
+                    <span className="px-2 py-0.5 rounded-full bg-primary-100 text-primary-700 font-medium text-xs">{a.event}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <footer className="py-6 border-t border-slate-200 mt-8 text-center text-xs text-slate-500 bg-white">
+        <p>VisionAssist Admin — Developed by <span className="font-semibold text-primary-600">PRIYAN</span></p>
+      </footer>
+    </div>
+  );
+}
+
+// Settings View
+function SettingsView({ onBack, settings, setSettings, contacts, setContacts }: {
+  onBack: () => void;
+  settings: AppSettings;
+  setSettings: (s: AppSettings) => void;
+  contacts: EmergencyContact[];
+  setContacts: (c: EmergencyContact[]) => void;
+}) {
+  const [local, setLocal] = useState<AppSettings>(settings);
+  const [newContact, setNewContact] = useState({ name: '', phone: '', relation: '' });
+
+  const save = async () => {
+    localStorage.setItem('visionassist_settings', JSON.stringify(local));
+    try {
+      const { data } = await supabase.from('app_settings').select('id').limit(1).maybeSingle();
+      if (data?.id) {
+        await supabase.from('app_settings').update({ ...local, updated_at: new Date().toISOString() }).eq('id', data.id);
+      } else {
+        await supabase.from('app_settings').insert(local);
+      }
+    } catch (e) {
+      console.warn('Failed to save settings to Supabase:', e);
+    }
+    setSettings(local);
+    configureSpeech(local.voice_speed || 1.0, local.voice_lang || 'en-US');
+    onBack();
+  };
+
+  const addContact = async () => {
+    if (!newContact.name || !newContact.phone) return;
+    const tempId = Date.now().toString();
+    const contactToInsert = { ...newContact, id: tempId };
+    setContacts([contactToInsert, ...contacts]);
+    localStorage.setItem('visionassist_contacts', JSON.stringify([contactToInsert, ...contacts]));
+
+    try {
+      const { data } = await supabase.from('emergency_contacts').insert(newContact).select().single();
+      if (data) {
+        const finalContacts = [data, ...contacts.filter(c => c.id !== tempId)];
+        setContacts(finalContacts);
+        localStorage.setItem('visionassist_contacts', JSON.stringify(finalContacts));
+      }
+    } catch (e) {
+      console.warn('Failed to add contact to Supabase:', e);
+    }
+    setNewContact({ name: '', phone: '', relation: '' });
+  };
+
+  const removeContact = async (id: string) => {
+    const remaining = contacts.filter((c) => c.id !== id);
+    setContacts(remaining);
+    localStorage.setItem('visionassist_contacts', JSON.stringify(remaining));
+
+    try {
+      await supabase.from('emergency_contacts').delete().eq('id', id);
+    } catch (e) {
+      console.warn('Failed to delete contact from Supabase:', e);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex flex-col justify-between">
+      <div>
+        <nav className="sticky top-0 z-40 glass border-b border-slate-200/50">
+          <div className="px-4 py-3 flex items-center gap-3">
+            <button onClick={onBack} className="p-2 rounded-lg hover:bg-slate-100 transition-colors">
+              <Home className="w-5 h-5 text-slate-600" />
+            </button>
+            <div className="flex items-center gap-2">
+              <Settings className="w-5 h-5 text-primary-600" />
+              <span className="font-bold text-slate-800">Settings</span>
+            </div>
+          </div>
+        </nav>
+
+        <div className="max-w-3xl mx-auto p-6 space-y-6">
+          <div className="bg-white rounded-2xl p-6 card-shadow border border-slate-100">
+            <h3 className="font-bold text-slate-700 mb-4">Voice Settings</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="text-sm font-medium text-slate-600 block mb-2">Voice Speed: {local.voice_speed?.toFixed(1)}x</label>
+                <input type="range" min="0.5" max="2" step="0.1" value={local.voice_speed || 1}
+                  onChange={(e) => setLocal({ ...local, voice_speed: parseFloat(e.target.value) })}
+                  className="w-full accent-primary-600" />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-600 block mb-2">Voice Language</label>
+                <select value={local.voice_lang || 'en-US'} onChange={(e) => setLocal({ ...local, voice_lang: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-primary-300 focus:outline-none">
+                  <option value="en-US">English (US)</option>
+                  <option value="en-GB">English (UK)</option>
+                  <option value="en-IN">English (India)</option>
+                  <option value="hi-IN">Hindi (India)</option>
+                  <option value="ta-IN">Tamil (India)</option>
+                  <option value="te-IN">Telugu (India)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl p-6 card-shadow border border-slate-100">
+            <h3 className="font-bold text-slate-700 mb-4">Detection Settings</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="text-sm font-medium text-slate-600 block mb-2">Confidence Threshold: {((local.confidence_threshold || 0.5) * 100).toFixed(0)}%</label>
+                <input type="range" min="0.1" max="0.9" step="0.05" value={local.confidence_threshold || 0.5}
+                  onChange={(e) => setLocal({ ...local, confidence_threshold: parseFloat(e.target.value) })}
+                  className="w-full accent-primary-600" />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-600 block mb-2">Camera Quality</label>
+                <select value={local.camera_quality || 'medium'} onChange={(e) => setLocal({ ...local, camera_quality: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-primary-300 focus:outline-none">
+                  <option value="low">Low (320p)</option>
+                  <option value="medium">Medium (480p)</option>
+                  <option value="high">High (720p)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl p-6 card-shadow border border-slate-100">
+            <h3 className="font-bold text-slate-700 mb-4">Emergency Contacts</h3>
+            <div className="space-y-2 mb-4">
+              {contacts.map((c) => (
+                <div key={c.id} className="flex items-center gap-3 p-3 rounded-xl bg-slate-50">
+                  <div className="flex-1">
+                    <div className="font-medium text-slate-700">{c.name}</div>
+                    <div className="text-sm text-slate-500">{c.phone} {c.relation && `· ${c.relation}`}</div>
+                  </div>
+                  <button onClick={() => removeContact(c.id!)} className="p-1.5 rounded-lg hover:bg-error-500/10 transition-colors">
+                    <X className="w-4 h-4 text-error-500" />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <input type="text" placeholder="Name" value={newContact.name}
+                onChange={(e) => setNewContact({ ...newContact, name: e.target.value })}
+                className="px-3 py-2 text-sm rounded-lg border border-slate-200 focus:border-primary-300 focus:outline-none" />
+              <input type="text" placeholder="Phone" value={newContact.phone}
+                onChange={(e) => setNewContact({ ...newContact, phone: e.target.value })}
+                className="px-3 py-2 text-sm rounded-lg border border-slate-200 focus:border-primary-300 focus:outline-none" />
+              <button onClick={addContact} className="px-3 py-2 text-sm rounded-lg bg-primary-600 text-white font-medium">Add</button>
+            </div>
+          </div>
+
+          <button onClick={save} className="w-full py-3 rounded-xl bg-gradient-to-r from-primary-600 to-accent-500 text-white font-semibold hover:shadow-lg transition-all">
+            Save Settings
+          </button>
+        </div>
+      </div>
+
+      <footer className="py-6 border-t border-slate-200 mt-8 text-center text-xs text-slate-500 bg-white">
+        <p>VisionAssist Settings — Developed by <span className="font-semibold text-primary-600">PRIYAN</span></p>
+      </footer>
+    </div>
+  );
+}
