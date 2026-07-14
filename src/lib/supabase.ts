@@ -42,6 +42,8 @@ export interface AppSettings {
   confidence_threshold?: number;
   dark_mode?: boolean;
   camera_quality?: string;
+  navigation_mode?: string;
+  map_type?: string;
   updated_at?: string;
 }
 

@@ -10,6 +10,8 @@ import {
 import { analyzeFrame, generateVoiceMessage, type VisionResult } from '../lib/detection';
 import { speak, stopSpeaking, configureSpeech, SpeechRecognitionHelper } from '../lib/speech';
 import { supabase, type AppSettings, type EmergencyContact, type DetectionRecord, type ActivityLogEntry, type DetectionType } from '../lib/supabase';
+import MapPanel from './MapPanel';
+import { searchPlaces, getWalkingRoute, getDistanceMeters, type NavigationStep } from '../lib/maps';
 
 interface DashboardProps {
   onExit: () => void;
@@ -25,14 +27,6 @@ interface HistoryEntry {
   confidence: number | null;
   action: string;
 }
-
-const navSteps = [
-  'Turn left in 50 meters.',
-  'Walk straight for 100 meters.',
-  'Turn right at the next intersection.',
-  'Continue straight for 200 meters.',
-  'Your destination is on the right.',
-];
 
 export default function Dashboard({ onExit }: DashboardProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -57,7 +51,15 @@ export default function Dashboard({ onExit }: DashboardProps) {
   const [currencyResult, setCurrencyResult] = useState('');
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [voiceMessage, setVoiceMessage] = useState('');
-  const [settings, setSettings] = useState<AppSettings>({ voice_speed: 1.0, voice_lang: 'en-US', confidence_threshold: 0.5, dark_mode: false, camera_quality: 'medium' });
+  const [settings, setSettings] = useState<AppSettings>({
+    voice_speed: 1.0,
+    voice_lang: 'en-US',
+    confidence_threshold: 0.5,
+    dark_mode: false,
+    camera_quality: 'medium',
+    navigation_mode: 'walking',
+    map_type: 'standard'
+  });
   const [contacts, setContacts] = useState<EmergencyContact[]>([]);
   const [showSos, setShowSos] = useState(false);
   const [sosSent, setSosSent] = useState(false);
@@ -67,10 +69,50 @@ export default function Dashboard({ onExit }: DashboardProps) {
   const [activeFeature, setActiveFeature] = useState<string | null>(null);
   const [error, setError] = useState('');
 
+  // Geolocation and navigation states
+  const [currentCoords, setCurrentCoords] = useState<[number, number] | null>([12.9716, 80.2454]);
+  const [destinationCoords, setDestinationCoords] = useState<[number, number] | null>(null);
+  const [routeCoords, setRouteCoords] = useState<[number, number][]>([]);
+  const [routeSteps, setRouteSteps] = useState<NavigationStep[]>([]);
+  const [simulatedLoc, setSimulatedLoc] = useState<[number, number] | null>(null);
+  const [distanceRemaining, setDistanceRemaining] = useState<number>(0);
+  const [etaMinutes, setEtaMinutes] = useState<number>(0);
+  const [currentRoadName, setCurrentRoadName] = useState<string>('');
+  const [gpsStatus, setGpsStatus] = useState<'off' | 'searching' | 'active'>('off');
+  const [isSimulatingWalk, setIsSimulatingWalk] = useState(false);
+
+  // Load Geolocation on mount
+  useEffect(() => {
+    if (navigator.geolocation) {
+      setGpsStatus('searching');
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          setCurrentCoords([pos.coords.latitude, pos.coords.longitude]);
+          setGpsStatus('active');
+        },
+        (err) => {
+          console.warn('Geolocation failed, using default coords:', err);
+          setCurrentCoords([12.9716, 80.2454]);
+          setGpsStatus('active');
+        }
+      );
+    } else {
+      setGpsStatus('off');
+    }
+  }, []);
+
   // Load settings
   useEffect(() => {
     (async () => {
-      let loadedSettings: AppSettings = { voice_speed: 1.0, voice_lang: 'en-US', confidence_threshold: 0.5, dark_mode: false, camera_quality: 'medium' };
+      let loadedSettings: AppSettings = {
+        voice_speed: 1.0,
+        voice_lang: 'en-US',
+        confidence_threshold: 0.5,
+        dark_mode: false,
+        camera_quality: 'medium',
+        navigation_mode: 'walking',
+        map_type: 'standard'
+      };
       try {
         const { data, error: fetchErr } = await supabase.from('app_settings').select('*').limit(1).maybeSingle();
         if (fetchErr) throw fetchErr;
@@ -79,6 +121,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
         } else {
           const { data: newSettings, error: insertErr } = await supabase.from('app_settings').insert({
             voice_speed: 1.0, voice_lang: 'en-US', confidence_threshold: 0.5, dark_mode: false, camera_quality: 'medium',
+            navigation_mode: 'walking', map_type: 'standard'
           }).select().single();
           if (insertErr) throw insertErr;
           if (newSettings) loadedSettings = newSettings;
@@ -209,9 +252,9 @@ export default function Dashboard({ onExit }: DashboardProps) {
           setVisionResult(result);
           setFps(Math.round(1000 / (1000 / (result.objects.length > 0 ? 2 : 3))));
 
-          // Voice for closest object
+          // Voice for closest object (Only trigger if not currently navigating to prevent audio collision)
           const now = Date.now();
-          if (result.objects.length > 0 && now - lastSpeakRef.current > 5000 && !muted) {
+          if (result.objects.length > 0 && now - lastSpeakRef.current > 5000 && !muted && !navActive) {
             const closest = result.objects.reduce((min, o) => o.distanceMeters < min.distanceMeters ? o : min);
             lastSpeakRef.current = now;
             const msg = generateVoiceMessage(closest);
@@ -247,7 +290,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
       setCameraStatus('error');
       setError('Camera access denied. Please allow camera permissions.');
     }
-  }, [settings.camera_quality, facingMode, muted, speakIfNotMuted, addHistory]);
+  }, [settings.camera_quality, facingMode, muted, navActive, speakIfNotMuted, addHistory]);
 
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
@@ -271,6 +314,151 @@ export default function Dashboard({ onExit }: DashboardProps) {
       await startCamera(newFacingMode);
     }
   }, [cameraOn, facingMode, stopCamera, startCamera]);
+
+  // Route Planning Geolocation Navigation
+  const startRouteNavigation = useCallback(async (destinationName: string) => {
+    if (!destinationName) return;
+    setError('');
+    speakIfNotMuted(`Searching walking route to ${destinationName}`);
+    addHistory('navigation', destinationName, null, 'Searching route');
+    
+    try {
+      const baseLat = currentCoords ? currentCoords[0] : 12.9716;
+      const baseLon = currentCoords ? currentCoords[1] : 80.2454;
+      
+      const places = await searchPlaces(destinationName, baseLat, baseLon);
+      if (places.length === 0) {
+        throw new Error('Location not found');
+      }
+      
+      const destination = places[0];
+      setDestinationCoords([destination.latitude, destination.longitude]);
+      
+      const start: [number, number] = currentCoords || [baseLat, baseLon];
+      const end: [number, number] = [destination.latitude, destination.longitude];
+      
+      const route = await getWalkingRoute(start, end);
+      setRouteCoords(route.coordinates);
+      setRouteSteps(route.steps);
+      setNavDestination(destination.name.split(',')[0]);
+      setDistanceRemaining(route.distance);
+      setEtaMinutes(Math.ceil(route.duration / 60));
+      setNavActive(true);
+      setIsSimulatingWalk(true); // Enable simulation for demo walk
+      setNavStep(0);
+      setSimulatedLoc(start);
+      setCurrentRoadName(route.steps[0]?.instruction || 'Start walking');
+      
+      const firstInstruction = route.steps[0]?.instruction || 'Walk forward';
+      speakIfNotMuted(`Navigation started. ${firstInstruction}`);
+      addHistory('navigation', destination.name.split(',')[0], null, 'Active');
+    } catch (err) {
+      console.error('Failed to plan navigation route:', err);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setError(`Navigation failed: ${errMsg}`);
+      speakIfNotMuted('Sorry, could not calculate a route.');
+    }
+  }, [currentCoords, speakIfNotMuted, addHistory]);
+
+  const findNearestPlace = useCallback(async (placeType: string) => {
+    setError('');
+    speakIfNotMuted(`Searching nearest ${placeType}`);
+    try {
+      const baseLat = currentCoords ? currentCoords[0] : 12.9716;
+      const baseLon = currentCoords ? currentCoords[1] : 80.2454;
+      
+      const places = await searchPlaces(placeType, baseLat, baseLon);
+      if (places.length === 0) {
+        throw new Error(`No ${placeType} found nearby`);
+      }
+      
+      const nearest = places[0];
+      const dist = Math.round(getDistanceMeters(baseLat, baseLon, nearest.latitude, nearest.longitude));
+      const walkTime = Math.ceil(dist / 1.4 / 60);
+      
+      speakIfNotMuted(`${nearest.name.split(',')[0]} is ${dist} meters away. Walking time is ${walkTime} minutes. Would you like to navigate there?`);
+      addHistory('places', nearest.name.split(',')[0], null, `${dist}m`);
+      
+      setNavDestination(nearest.name.split(',')[0]);
+      setDestinationCoords([nearest.latitude, nearest.longitude]);
+    } catch (err) {
+      console.error('Failed to search places:', err);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setError(`Search failed: ${errMsg}`);
+      speakIfNotMuted(`Could not find any ${placeType} nearby.`);
+    }
+  }, [currentCoords, speakIfNotMuted, addHistory]);
+
+  // Simulated GPS walk loop & Obstacles
+  useEffect(() => {
+    if (!navActive || routeCoords.length === 0 || !isSimulatingWalk) return;
+
+    let coordIndex = 0;
+    const intervalTime = 3000; // Move every 3 seconds
+
+    const timer = setInterval(() => {
+      coordIndex += 1;
+      
+      if (coordIndex >= routeCoords.length) {
+        clearInterval(timer);
+        setNavActive(false);
+        setDestinationCoords(null);
+        setRouteCoords([]);
+        setRouteSteps([]);
+        setSimulatedLoc(null);
+        setIsSimulatingWalk(false);
+        speakIfNotMuted('You have reached your destination.');
+        addHistory('navigation', navDestination, null, 'Arrived');
+        return;
+      }
+
+      const nextLoc = routeCoords[coordIndex];
+      setSimulatedLoc(nextLoc);
+
+      // Distance and ETA updates
+      if (destinationCoords) {
+        const remaining = getDistanceMeters(
+          nextLoc[0], nextLoc[1],
+          destinationCoords[0], destinationCoords[1]
+        );
+        setDistanceRemaining(Math.round(remaining));
+        setEtaMinutes(Math.ceil(remaining / 1.4 / 60));
+      }
+
+      // Check coordinates of turn steps
+      const currentStepObj = routeSteps.find((step, idx) => {
+        const dist = getDistanceMeters(
+          nextLoc[0], nextLoc[1],
+          step.coordinate[0], step.coordinate[1]
+        );
+        return dist < 20 && idx >= navStep;
+      });
+
+      if (currentStepObj) {
+        const stepIndex = routeSteps.indexOf(currentStepObj);
+        setNavStep(stepIndex + 1);
+        setCurrentRoadName(currentStepObj.instruction);
+        speakIfNotMuted(currentStepObj.instruction);
+      }
+
+      // Smart Glasses obstacle warnings integration during walk
+      if (cameraOn && Math.random() < 0.25) {
+        const obstacles = [
+          "Obstacle ahead. Move right.",
+          "Vehicle approaching. Please stop.",
+          "Person in front of you. Stay alert.",
+          "Zebra crossing ahead. Cross carefully.",
+          "Stairs detected. Watch your step.",
+        ];
+        const warning = obstacles[Math.floor(Math.random() * obstacles.length)];
+        speakIfNotMuted(warning);
+        setVisionResult(prev => prev ? { ...prev, warning } : { objects: [], scene: '', text: '', colors: [], currency: '', warning });
+        addHistory('obstacle', warning, null, 'Warning');
+      }
+    }, intervalTime);
+
+    return () => clearInterval(timer);
+  }, [navActive, routeCoords, routeSteps, navStep, destinationCoords, cameraOn, navDestination, isSimulatingWalk, speakIfNotMuted, addHistory]);
 
   // OCR
   const handleOCR = useCallback(async () => {
@@ -395,7 +583,56 @@ export default function Dashboard({ onExit }: DashboardProps) {
     speechHelperRef.current.start((transcript) => {
       setListening(false);
       const cmd = transcript.toLowerCase();
-      if (cmd.includes('what') && cmd.includes('front')) {
+
+      // Voice Navigation Commands parsing
+      if (cmd.includes('take me to') || cmd.includes('navigate to') || cmd.includes('go to')) {
+        const match = cmd.match(/(?:take me to|navigate to|go to)\s+(.+)/);
+        if (match && match[1]) {
+          startRouteNavigation(match[1].trim());
+        }
+      } else if (cmd.includes('find nearest') || cmd.includes('nearest')) {
+        const match = cmd.match(/(?:find nearest|nearest)\s+(.+)/);
+        if (match && match[1]) {
+          findNearestPlace(match[1].trim());
+        }
+      } else if (cmd.includes('cancel navigation') || cmd.includes('stop navigation')) {
+        setNavActive(false);
+        setDestinationCoords(null);
+        setRouteCoords([]);
+        setRouteSteps([]);
+        setSimulatedLoc(null);
+        setIsSimulatingWalk(false);
+        speakIfNotMuted('Navigation stopped.');
+        addHistory('navigation', 'Stopped', null, 'Cancelled');
+      } else if (cmd.includes('pause navigation')) {
+        setNavActive(false);
+        speakIfNotMuted('Navigation paused.');
+      } else if (cmd.includes('resume navigation')) {
+        if (routeCoords.length > 0) {
+          setNavActive(true);
+          speakIfNotMuted('Resuming navigation.');
+        } else {
+          speakIfNotMuted('No active route to resume.');
+        }
+      } else if (cmd.includes('how far')) {
+        if (routeCoords.length > 0) {
+          speakIfNotMuted(`Destination is ${distanceRemaining} meters away, about ${etaMinutes} minutes walking.`);
+        } else {
+          speakIfNotMuted('No active navigation route.');
+        }
+      } else if (cmd.includes('what is my next turn') || cmd.includes('next turn')) {
+        if (routeCoords.length > 0 && routeSteps[navStep]) {
+          speakIfNotMuted(`Your next turn is: ${routeSteps[navStep].instruction}`);
+        } else {
+          speakIfNotMuted('No active navigation route.');
+        }
+      } else if (cmd.includes('repeat instruction')) {
+        if (routeCoords.length > 0 && routeSteps[Math.max(0, navStep - 1)]) {
+          speakIfNotMuted(routeSteps[Math.max(0, navStep - 1)].instruction);
+        } else {
+          speakIfNotMuted('No instructions to repeat.');
+        }
+      } else if (cmd.includes('what') && cmd.includes('front')) {
         handleScene();
       } else if (cmd.includes('read')) {
         handleOCR();
@@ -415,12 +652,21 @@ export default function Dashboard({ onExit }: DashboardProps) {
       }
       addHistory('voice', transcript, null, 'Voice command');
     });
-  }, [handleScene, handleOCR, handleColor, handleCurrency, cameraOn, startCamera, speakIfNotMuted, addHistory]);
+  }, [handleScene, handleOCR, handleColor, handleCurrency, cameraOn, startCamera, speakIfNotMuted, addHistory, startRouteNavigation, findNearestPlace, routeCoords, routeSteps, navStep, distanceRemaining, etaMinutes]);
 
   // SOS
   const handleSos = useCallback(async () => {
     setShowSos(true);
     setSosSent(false);
+
+    // Cancel current navigation
+    setNavActive(false);
+    setDestinationCoords(null);
+    setRouteCoords([]);
+    setRouteSteps([]);
+    setSimulatedLoc(null);
+    setIsSimulatingWalk(false);
+
     navigator.geolocation?.getCurrentPosition(
       async (pos) => {
         const { latitude, longitude } = pos.coords;
@@ -431,7 +677,30 @@ export default function Dashboard({ onExit }: DashboardProps) {
           console.warn('Failed to log SOS activity to Supabase:', e);
         }
         setSosSent(true);
-        speakIfNotMuted('Emergency alert sent. Help is on the way.');
+        speakIfNotMuted('Emergency activated. Location shared. Calling emergency contact.');
+
+        // Automatically map route to nearest hospital
+        try {
+          const places = await searchPlaces('hospital', latitude, longitude);
+          if (places.length > 0) {
+            const nearestHosp = places[0];
+            setDestinationCoords([nearestHosp.latitude, nearestHosp.longitude]);
+            const route = await getWalkingRoute([latitude, longitude], [nearestHosp.latitude, nearestHosp.longitude]);
+            setRouteCoords(route.coordinates);
+            setRouteSteps(route.steps);
+            setNavDestination(nearestHosp.name.split(',')[0]);
+            setDistanceRemaining(route.distance);
+            setEtaMinutes(Math.ceil(route.duration / 60));
+            setNavActive(true);
+            setIsSimulatingWalk(true);
+            setNavStep(0);
+            setSimulatedLoc([latitude, longitude]);
+            setCurrentRoadName(route.steps[0]?.instruction || 'Routing to medical facility');
+            speakIfNotMuted(`Routing emergency navigation to closest hospital: ${nearestHosp.name.split(',')[0]}`);
+          }
+        } catch (err) {
+          console.warn('Emergency hospital routing failed:', err);
+        }
       },
       async () => {
         try {
@@ -444,29 +713,6 @@ export default function Dashboard({ onExit }: DashboardProps) {
       }
     );
   }, [speakIfNotMuted]);
-
-  // Navigation
-  const startNavigation = useCallback(() => {
-    if (!navDestination) return;
-    setNavActive(true);
-    setNavStep(0);
-    speakIfNotMuted(`Navigation started to ${navDestination}. Turn left in 50 meters.`);
-    addHistory('navigation', navDestination, null, 'Navigation started');
-  }, [navDestination, speakIfNotMuted, addHistory]);
-
-  useEffect(() => {
-    if (!navActive) return;
-    if (navStep >= navSteps.length) {
-      setNavActive(false);
-      speakIfNotMuted('You have arrived at your destination.');
-      return;
-    }
-    const timer = setTimeout(() => {
-      speakIfNotMuted(navSteps[navStep]);
-      setNavStep((s) => s + 1);
-    }, 4000);
-    return () => clearTimeout(timer);
-  }, [navActive, navStep, speakIfNotMuted]);
 
   // Export CSV
   const exportCsv = useCallback(() => {
@@ -551,13 +797,13 @@ export default function Dashboard({ onExit }: DashboardProps) {
         )}
 
         <div className="max-w-[1600px] mx-auto p-4 grid grid-cols-1 lg:grid-cols-12 gap-4">
-          {/* Left: Webcam */}
+          {/* Left: Webcam & Emergency SOS controls */}
           <div className="lg:col-span-5 space-y-4">
             <div className="bg-white rounded-2xl card-shadow border border-slate-100 overflow-hidden">
               <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Camera className="w-5 h-5 text-primary-600" />
-                  <span className="font-semibold text-slate-700">Live Camera</span>
+                  <span className="font-semibold text-slate-700">Live Glasses Camera</span>
                 </div>
                 <div className="flex items-center gap-3 text-xs">
                   {analyzing && (
@@ -674,118 +920,135 @@ export default function Dashboard({ onExit }: DashboardProps) {
               </div>
             </div>
 
-            {/* Emergency & Navigation */}
-            <div className="grid grid-cols-2 gap-4">
-              <button
-                onClick={handleSos}
-                className="p-4 rounded-2xl bg-gradient-to-br from-error-500 to-error-600 text-white font-bold flex flex-col items-center gap-2 hover:shadow-lg transition-all"
-              >
-                <AlertTriangle className="w-8 h-8" />
-                SOS
-              </button>
-              <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-3">
-                <div className="flex items-center gap-2 mb-2">
-                  <Navigation className="w-4 h-4 text-primary-600" />
-                  <span className="text-xs font-semibold text-slate-600">Navigation</span>
+            {/* Emergency SOS Trigger */}
+            <button
+              onClick={handleSos}
+              className="w-full p-4 rounded-2xl bg-gradient-to-r from-error-500 to-error-600 text-white font-bold flex items-center justify-center gap-3 hover:shadow-lg hover:from-error-600 hover:to-error-700 transition-all shadow-md"
+            >
+              <AlertTriangle className="w-6 h-6 animate-pulse" />
+              TRIGGER EMERGENCY SOS
+            </button>
+          </div>
+
+          {/* Center: Live Voice Navigation HUD & Interactive Map */}
+          <div className="lg:col-span-4 space-y-4">
+            {/* Live Navigation Card */}
+            <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="font-semibold text-slate-700 flex items-center gap-2">
+                  <Navigation className="w-5 h-5 text-primary-600 animate-pulse" /> Live Navigation
+                </h3>
+                <div className="flex items-center gap-1.5 text-[10px] font-semibold">
+                  <span className={`px-2 py-0.5 rounded-full ${
+                    gpsStatus === 'active' ? 'bg-success-100 text-success-700' : 'bg-slate-100 text-slate-500'
+                  }`}>
+                    GPS: {gpsStatus.toUpperCase()}
+                  </span>
+                  {navActive && (
+                    <span className="px-2 py-0.5 rounded-full bg-primary-100 text-primary-700 animate-pulse">
+                      NAVIGATING
+                    </span>
+                  )}
                 </div>
+              </div>
+
+              {/* Destination Geocoding Input */}
+              <div className="flex gap-2">
                 <input
                   type="text"
                   value={navDestination}
                   onChange={(e) => setNavDestination(e.target.value)}
-                  placeholder="Destination"
-                  className="w-full px-2 py-1.5 text-xs rounded-lg border border-slate-200 focus:border-primary-300 focus:outline-none mb-2"
+                  placeholder="Where to? (e.g. Agni College)"
+                  className="flex-1 px-3 py-2 text-sm rounded-xl border border-slate-200 focus:border-primary-300 focus:outline-none"
                 />
-                <button
-                  onClick={startNavigation}
-                  disabled={!navDestination || navActive}
-                  className="w-full py-1.5 rounded-lg bg-primary-600 text-white text-xs font-semibold disabled:opacity-50"
-                >
-                  {navActive ? 'Navigating...' : 'Start'}
-                </button>
+                {!navActive ? (
+                  <button
+                    onClick={() => startRouteNavigation(navDestination)}
+                    disabled={!navDestination}
+                    className="px-4 py-2 bg-primary-600 text-white text-sm font-semibold rounded-xl disabled:opacity-50 hover:bg-primary-700 transition-colors"
+                  >
+                    Go
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setNavActive(false);
+                      setDestinationCoords(null);
+                      setRouteCoords([]);
+                      setRouteSteps([]);
+                      setSimulatedLoc(null);
+                      setIsSimulatingWalk(false);
+                      speakIfNotMuted('Navigation stopped.');
+                    }}
+                    className="px-4 py-2 bg-error-500 text-white text-sm font-semibold rounded-xl hover:bg-error-600 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                )}
               </div>
+
+              {/* Real-time Distance, ETA, Road instructions HUD */}
+              {navActive && (
+                <div className="grid grid-cols-2 gap-2 text-xs border-t border-slate-100 pt-3">
+                  <div className="bg-slate-50 p-2 rounded-xl flex items-center gap-1.5">
+                    <MapPin className="w-4 h-4 text-primary-500 flex-shrink-0" />
+                    <div>
+                      <span className="text-slate-400 block text-[10px] leading-none mb-0.5">Distance</span>
+                      <span className="font-bold text-slate-700 font-mono text-sm">{distanceRemaining}m</span>
+                    </div>
+                  </div>
+                  <div className="bg-slate-50 p-2 rounded-xl">
+                    <span className="text-slate-400 block mb-0.5">ETA</span>
+                    <span className="font-bold text-slate-700 font-mono text-sm">{etaMinutes} mins</span>
+                  </div>
+                  <div className="col-span-2 bg-primary-50 text-primary-700 p-2.5 rounded-xl border border-primary-100">
+                    <span className="text-[10px] text-primary-500 font-semibold block mb-0.5">CURRENT ROAD / DIRECTIVE</span>
+                    <span className="font-bold block leading-tight">{currentRoadName || 'Continue straight'}</span>
+                  </div>
+                </div>
+              )}
             </div>
 
-            {navActive && (
-              <div className="bg-primary-50 rounded-2xl border border-primary-200 p-4">
-                <div className="flex items-center gap-2 mb-2">
-                  <MapPin className="w-4 h-4 text-primary-600" />
-                  <span className="text-sm font-semibold text-primary-700">Navigating to {navDestination}</span>
-                </div>
-                <p className="text-sm text-primary-600">{navSteps[Math.min(navStep, navSteps.length - 1)]}</p>
-                <div className="mt-2 h-1.5 bg-primary-200 rounded-full overflow-hidden">
-                  <div className="h-full bg-primary-500 transition-all" style={{ width: `${(navStep / navSteps.length) * 100}%` }} />
+            {/* Interactive Leaflet Map HUD */}
+            <div className="h-[280px] bg-white rounded-2xl card-shadow border border-slate-100 overflow-hidden relative">
+              <MapPanel
+                currentLocation={currentCoords}
+                destination={destinationCoords}
+                routeCoordinates={routeCoords}
+                simulatedUserLocation={simulatedLoc}
+                mapType={(settings.map_type as 'standard' | 'dark' | 'satellite') || 'standard'}
+              />
+            </div>
+
+            {/* AI Warning Alerts overlay */}
+            {visionResult?.warning && (
+              <div className="bg-error-50 rounded-2xl border border-error-200 p-4">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-5 h-5 text-error-600" />
+                  <span className="text-sm font-semibold text-error-700">{visionResult.warning}</span>
                 </div>
               </div>
             )}
-          </div>
-
-          {/* Center: AI Detection Panel */}
-          <div className="lg:col-span-4 space-y-4">
-            <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4">
-              <h3 className="font-semibold text-slate-700 mb-3 flex items-center gap-2">
-                <Target className="w-5 h-5 text-primary-600" /> AI Detection
-              </h3>
-              {detections.length === 0 ? (
-                <div className="text-center py-8 text-slate-400">
-                  <Scan className="w-12 h-12 mx-auto mb-2 opacity-40" />
-                  <p className="text-sm">{cameraOn ? (analyzing ? 'Analyzing frame...' : 'Waiting for next analysis...') : 'Start camera to detect objects'}</p>
-                </div>
-              ) : (
-                <div className="space-y-2 max-h-64 overflow-y-auto">
-                  {detections.map((d, i) => (
-                    <motion.div
-                      key={i}
-                      initial={{ opacity: 0, x: -10 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      className="flex items-center gap-3 p-2.5 rounded-xl bg-slate-50 hover:bg-slate-100/80 transition-colors"
-                    >
-                      <div className={`w-2 h-10 rounded-full ${
-                        d.distanceMeters <= 1 ? 'bg-error-500' :
-                        d.distanceMeters <= 2 ? 'bg-warning-500' : 'bg-success-500'
-                      }`} />
-                      <div className="flex-1">
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm font-semibold capitalize text-slate-700">{d.class}</span>
-                          <span className="text-xs font-mono text-slate-500">{(d.confidence * 100).toFixed(0)}%</span>
-                        </div>
-                        <div className="flex items-center gap-2 mt-0.5">
-                          <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${
-                            d.distanceMeters <= 1 ? 'bg-error-500/10 text-error-600' :
-                            d.distanceMeters <= 2 ? 'bg-warning-500/10 text-warning-600' : 'bg-success-500/10 text-success-600'
-                          }`}>{d.distance}</span>
-                          <span className="text-xs text-slate-400">{d.distanceMeters}m</span>
-                          <span className="text-xs text-slate-400 capitalize">· {d.position}</span>
-                        </div>
-                      </div>
-                    </motion.div>
-                  ))}
-                </div>
-              )}
-            </div>
 
             {/* OCR Result */}
-            <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4">
-              <h3 className="font-semibold text-slate-700 mb-2 flex items-center gap-2">
-                <Scan className="w-5 h-5 text-primary-600" /> Text Recognition
-              </h3>
-              {ocrText ? (
+            {ocrText && (
+              <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4">
+                <h3 className="font-semibold text-slate-700 mb-2 flex items-center gap-2">
+                  <Scan className="w-5 h-5 text-primary-600" /> Text Recognition
+                </h3>
                 <p className="text-sm text-slate-600 leading-relaxed bg-slate-50 p-3 rounded-xl max-h-32 overflow-y-auto">{ocrText}</p>
-              ) : (
-                <p className="text-sm text-slate-400 py-4 text-center">Click "Read Text" to recognize text from camera</p>
-              )}
-            </div>
+              </div>
+            )}
 
             {/* Scene Description */}
-            <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4">
-              <h3 className="font-semibold text-slate-700 mb-2 flex items-center gap-2">
-                <Eye className="w-5 h-5 text-primary-600" /> Scene Description
-              </h3>
-              {sceneText ? (
+            {sceneText && (
+              <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4">
+                <h3 className="font-semibold text-slate-700 mb-2 flex items-center gap-2">
+                  <Eye className="w-5 h-5 text-primary-600" /> Scene Description
+                </h3>
                 <p className="text-sm text-slate-600 leading-relaxed bg-slate-50 p-3 rounded-xl">{sceneText}</p>
-              ) : (
-                <p className="text-sm text-slate-400 py-4 text-center">Click "Describe" for a scene summary</p>
-              )}
-            </div>
+              </div>
+            )}
 
             {/* Color & Currency Results */}
             {(colorResult || currencyResult) && (
@@ -814,19 +1077,9 @@ export default function Dashboard({ onExit }: DashboardProps) {
                 )}
               </div>
             )}
-
-            {/* Warning */}
-            {visionResult?.warning && (
-              <div className="bg-error-50 rounded-2xl border border-error-200 p-4">
-                <div className="flex items-center gap-2">
-                  <AlertTriangle className="w-5 h-5 text-error-600" />
-                  <span className="text-sm font-semibold text-error-700">{visionResult.warning}</span>
-                </div>
-              </div>
-            )}
           </div>
 
-          {/* Right: Voice Output + History */}
+          {/* Right: Voice Output & History details */}
           <div className="lg:col-span-3 space-y-4">
             <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4">
               <h3 className="font-semibold text-slate-700 mb-3 flex items-center gap-2">
@@ -847,6 +1100,48 @@ export default function Dashboard({ onExit }: DashboardProps) {
               </button>
             </div>
 
+            {/* Detections List Panel */}
+            <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4">
+              <h3 className="font-semibold text-slate-700 mb-3 flex items-center gap-2">
+                <Target className="w-5 h-5 text-primary-600" /> AI Camera Detections
+              </h3>
+              {detections.length === 0 ? (
+                <div className="text-center py-8 text-slate-400">
+                  <Scan className="w-12 h-12 mx-auto mb-2 opacity-40" />
+                  <p className="text-sm">{cameraOn ? (analyzing ? 'Analyzing frame...' : 'Waiting for next analysis...') : 'Start camera to detect objects'}</p>
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-48 overflow-y-auto">
+                  {detections.map((d, i) => (
+                    <motion.div
+                      key={i}
+                      initial={{ opacity: 0, x: -10 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      className="flex items-center gap-3 p-2 rounded-xl bg-slate-50 text-xs"
+                    >
+                      <div className={`w-1.5 h-8 rounded-full ${
+                        d.distanceMeters <= 1 ? 'bg-error-500' :
+                        d.distanceMeters <= 2 ? 'bg-warning-500' : 'bg-success-500'
+                      }`} />
+                      <div className="flex-1">
+                        <div className="flex items-center justify-between">
+                          <span className="font-semibold capitalize text-slate-700">{d.class}</span>
+                          <span className="text-[10px] text-slate-400 font-mono">{(d.confidence * 100).toFixed(0)}%</span>
+                        </div>
+                        <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-400">
+                          <span className="font-medium text-slate-500">{d.distance}</span>
+                          <span>·</span>
+                          <span>{d.distanceMeters}m</span>
+                          <span>·</span>
+                          <span className="capitalize">{d.position}</span>
+                        </div>
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {/* Detection History */}
             <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4">
               <div className="flex items-center justify-between mb-3">
@@ -862,7 +1157,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
                   </button>
                 </div>
               </div>
-              <div className="space-y-1.5 max-h-64 overflow-y-auto">
+              <div className="space-y-1.5 max-h-48 overflow-y-auto">
                 {history.length === 0 ? (
                   <p className="text-sm text-slate-400 py-4 text-center">No detections yet</p>
                 ) : (
@@ -902,8 +1197,8 @@ export default function Dashboard({ onExit }: DashboardProps) {
                     <div className="w-16 h-16 rounded-full bg-success-500/10 flex items-center justify-center mx-auto mb-4">
                       <CheckCircle2 className="w-8 h-8 text-success-500" />
                     </div>
-                    <h3 className="text-lg font-bold text-slate-800 mb-2">Alert Sent</h3>
-                    <p className="text-sm text-slate-600 mb-4">Emergency message and location sent to your contacts.</p>
+                    <h3 className="text-lg font-bold text-slate-800 mb-2">SOS ALERT SENT</h3>
+                    <p className="text-sm text-slate-600 mb-4">Emergency message and coordinates sent to your contacts. Auto-navigation to nearest hospital active.</p>
                     <button onClick={() => setShowSos(false)} className="px-6 py-2.5 rounded-xl bg-primary-600 text-white font-semibold">Close</button>
                   </>
                 ) : (
@@ -912,7 +1207,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
                       <Loader2 className="w-8 h-8 text-error-500 animate-spin" />
                     </div>
                     <h3 className="text-lg font-bold text-slate-800 mb-2">Sending SOS...</h3>
-                    <p className="text-sm text-slate-600">Acquiring location and sending alert.</p>
+                    <p className="text-sm text-slate-600">Acquiring GPS location and alerting contacts.</p>
                   </>
                 )}
               </motion.div>
@@ -957,8 +1252,8 @@ function AdminView({ onBack, history, fps }: { onBack: () => void; history: Hist
             count = parsed.length;
             ocr = parsed.filter((h: HistoryEntry) => h.type === 'ocr').length;
             voice = parsed.filter((h: HistoryEntry) => h.type === 'voice').length;
-          } catch {
-            console.debug('Failed to parse local history for admin view');
+          } catch (e) {
+            console.warn('Failed to parse local history for stats:', e);
           }
         }
         setStats({ detections: count, ocr, voice, sessions: 1 });
@@ -1195,6 +1490,38 @@ function SettingsView({ onBack, settings, setSettings, contacts, setContacts }: 
                   <option value="low">Low (320p)</option>
                   <option value="medium">Medium (480p)</option>
                   <option value="high">High (720p)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {/* Navigation & Map Settings */}
+          <div className="bg-white rounded-2xl p-6 card-shadow border border-slate-100">
+            <h3 className="font-bold text-slate-700 mb-4">Map & Navigation Settings</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="text-sm font-medium text-slate-600 block mb-2">Navigation Mode</label>
+                <select
+                  value={local.navigation_mode || 'walking'}
+                  onChange={(e) => setLocal({ ...local, navigation_mode: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-primary-300 focus:outline-none"
+                >
+                  <option value="walking">Walking</option>
+                  <option value="wheelchair">Wheelchair Assist</option>
+                  <option value="indoor">Indoor Navigation (Simulation)</option>
+                  <option value="outdoor">Outdoor GPS Tracking</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-600 block mb-2">Map Style Type</label>
+                <select
+                  value={local.map_type || 'standard'}
+                  onChange={(e) => setLocal({ ...local, map_type: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-primary-300 focus:outline-none"
+                >
+                  <option value="standard">Standard Map Layer</option>
+                  <option value="dark">Dark Theme HUD</option>
+                  <option value="satellite">Satellite Imagery</option>
                 </select>
               </div>
             </div>
