@@ -1,3 +1,5 @@
+import { translateText } from './speech';
+
 export interface DetectedObject {
   class: string;
   confidence: number;
@@ -40,7 +42,8 @@ interface RawObject {
 
 export async function analyzeFrame(
   video: HTMLVideoElement,
-  customPrompt?: string
+  customPrompt?: string,
+  targetLang?: string
 ): Promise<VisionResult> {
   const image = captureFrame(video);
   if (!image) throw new Error('Could not capture frame');
@@ -52,7 +55,7 @@ export async function analyzeFrame(
         'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ image, prompt: customPrompt }),
+      body: JSON.stringify({ image, prompt: customPrompt, lang: targetLang }),
     });
 
     if (!response.ok) {
@@ -76,9 +79,90 @@ export async function analyzeFrame(
       warning: data.warning || '',
     };
   } catch (err) {
-    console.warn('AI analysis API failed, using client-side fallback simulation:', err);
+    console.warn('AI analysis API failed, trying client-side local detector:', err);
 
-    // Simulate network delay
+    // If local TensorFlow COCO-SSD is loaded in window, run real deep learning detection!
+    if (typeof window !== 'undefined' && (window as any).cocoSsd) {
+      try {
+        const model = await (window as any).cocoSsd.load();
+        const predictions = await model.detect(video);
+        
+        const videoWidth = video.videoWidth || 640;
+        const videoHeight = video.videoHeight || 480;
+
+        const objects: DetectedObject[] = predictions.map((pred: any) => {
+          const [x, , w, h] = pred.bbox;
+          const centerX = x + w / 2;
+          
+          // Determine position
+          let position: 'left' | 'center' | 'right' = 'center';
+          if (centerX < videoWidth * 0.35) {
+            position = 'left';
+          } else if (centerX > videoWidth * 0.65) {
+            position = 'right';
+          }
+
+          // Estimate distance
+          const relativeHeight = h / videoHeight;
+          const distanceMeters = Math.min(10, Math.max(0.3, Math.round((0.5 / relativeHeight) * 10) / 10));
+          
+          let distance: 'Very close' | 'Close' | 'Medium' | 'Far' = 'Far';
+          if (distanceMeters <= 1.2) distance = 'Very close';
+          else if (distanceMeters <= 2.2) distance = 'Close';
+          else if (distanceMeters <= 4.2) distance = 'Medium';
+
+          // Translate class name if targetLang is provided
+          let className = pred.class;
+          if (targetLang && targetLang !== 'en-US') {
+            className = translateText(pred.class, targetLang);
+          }
+
+          return {
+            class: className,
+            confidence: Math.round(pred.score * 100) / 100,
+            position,
+            distance,
+            distanceMeters,
+            bbox: pred.bbox
+          };
+        });
+
+        // Build heuristic scene description
+        let scene = '';
+        if (objects.length > 0) {
+          const names = objects.map((o) => o.class).join(', ');
+          scene = `Detected ${names} in front of you.`;
+        } else {
+          scene = 'Clear path in front of you.';
+        }
+
+        const nearObstacle = objects.find(o => o.distanceMeters <= 1.2);
+        const warning = nearObstacle ? `Warning: ${nearObstacle.class} is very close at ${nearObstacle.distanceMeters} meters` : '';
+
+        // Translate scene & warning
+        let finalScene = scene;
+        let finalWarning = warning;
+        if (targetLang && targetLang !== 'en-US') {
+          finalScene = translateText(scene, targetLang);
+          if (warning) {
+            finalWarning = translateText(warning, targetLang);
+          }
+        }
+
+        return {
+          objects,
+          scene: finalScene,
+          text: '',
+          colors: [],
+          currency: '',
+          warning: finalWarning
+        };
+      } catch (cocoErr) {
+        console.error('Local COCO-SSD detection failed, using fallback simulation:', cocoErr);
+      }
+    }
+
+    // Default object detection simulation fallback if coco-ssd fails or is not loaded
     await new Promise((resolve) => setTimeout(resolve, 800));
 
     const promptStr = (customPrompt || '').toLowerCase();
@@ -91,7 +175,10 @@ export async function analyzeFrame(
         "Organic Milk - Ingredients: Pasteurized Milk, Vitamin D3.",
         "Metro Station Exit. Main Street is 100m away."
       ];
-      const randomText = textOptions[Math.floor(Math.random() * textOptions.length)];
+      let randomText = textOptions[Math.floor(Math.random() * textOptions.length)];
+      if (targetLang && targetLang !== 'en-US') {
+        randomText = translateText(randomText, targetLang);
+      }
       return {
         objects: [],
         scene: '',
@@ -109,7 +196,10 @@ export async function analyzeFrame(
         "An outdoor pathway with green trees, grass on the sides, and clear sky.",
         "A kitchen counter with a microwave, toaster, and some ceramic cups."
       ];
-      const randomScene = scenes[Math.floor(Math.random() * scenes.length)];
+      let randomScene = scenes[Math.floor(Math.random() * scenes.length)];
+      if (targetLang && targetLang !== 'en-US') {
+        randomScene = translateText(randomScene, targetLang);
+      }
       return {
         objects: [],
         scene: randomScene,
@@ -139,7 +229,10 @@ export async function analyzeFrame(
 
     if (promptStr.includes('currency note')) {
       const notes = ["100 Rupees note", "500 Rupees note", "50 Rupees note"];
-      const randomNote = notes[Math.floor(Math.random() * notes.length)];
+      let randomNote = notes[Math.floor(Math.random() * notes.length)];
+      if (targetLang && targetLang !== 'en-US') {
+        randomNote = translateText(randomNote, targetLang);
+      }
       return {
         objects: [],
         scene: '',
@@ -151,9 +244,15 @@ export async function analyzeFrame(
     }
 
     if (promptStr.includes('people visible')) {
+      let pScene = 'A person standing in front of you.';
+      let pClass = 'person';
+      if (targetLang && targetLang !== 'en-US') {
+        pScene = translateText(pScene, targetLang);
+        pClass = translateText(pClass, targetLang);
+      }
       return {
-        objects: [{ class: 'person', confidence: 0.92, position: 'center', distance: 'Medium', distanceMeters: 2.1 }],
-        scene: 'A person standing in front of you.',
+        objects: [{ class: pClass, confidence: 0.92, position: 'center', distance: 'Medium', distanceMeters: 2.1 }],
+        scene: pScene,
         text: '',
         colors: [],
         currency: '',
@@ -161,7 +260,7 @@ export async function analyzeFrame(
       };
     }
 
-    // Default object detection
+    // Default simulated object detection pool
     const objectPool = [
       { class: 'chair', position: 'left' as const, distance: 'Near' as const, distanceMeters: 1.2 },
       { class: 'laptop', position: 'center' as const, distance: 'Near' as const, distanceMeters: 0.8 },
@@ -173,11 +272,15 @@ export async function analyzeFrame(
 
     // Pick 1-3 random objects
     const numObjects = Math.floor(Math.random() * 3) + 1;
-    const selectedObjects = [];
+    const selectedObjects: DetectedObject[] = [];
     const shuffled = [...objectPool].sort(() => 0.5 - Math.random());
     for (let i = 0; i < numObjects; i++) {
+      let className = shuffled[i].class;
+      if (targetLang && targetLang !== 'en-US') {
+        className = translateText(shuffled[i].class, targetLang);
+      }
       selectedObjects.push({
-        class: shuffled[i].class,
+        class: className,
         confidence: Math.round((0.75 + Math.random() * 0.2) * 100) / 100,
         position: shuffled[i].position,
         distance: shuffled[i].distance,
@@ -186,7 +289,10 @@ export async function analyzeFrame(
     }
 
     const nearObstacle = selectedObjects.find(o => o.distanceMeters <= 1);
-    const warning = nearObstacle ? `Warning: ${nearObstacle.class} is very close at ${nearObstacle.distanceMeters} meters` : '';
+    let warning = nearObstacle ? `Warning: ${nearObstacle.class} is very close at ${nearObstacle.distanceMeters} meters` : '';
+    if (warning && targetLang && targetLang !== 'en-US') {
+      warning = translateText(warning, targetLang);
+    }
 
     return {
       objects: selectedObjects,

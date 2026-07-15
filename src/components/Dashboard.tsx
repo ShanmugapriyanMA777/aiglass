@@ -8,7 +8,7 @@ import {
   CheckCircle2, AlertCircle, Loader2, ScanFace, RefreshCw,
 } from 'lucide-react';
 import { analyzeFrame, generateVoiceMessage, type VisionResult } from '../lib/detection';
-import { speak, stopSpeaking, configureSpeech, SpeechRecognitionHelper } from '../lib/speech';
+import { speak, stopSpeaking, configureSpeech, SpeechRecognitionHelper, isSpeaking } from '../lib/speech';
 import { supabase, type AppSettings, type EmergencyContact, type DetectionRecord, type ActivityLogEntry, type DetectionType } from '../lib/supabase';
 import MapPanel from './MapPanel';
 import { searchPlaces, getWalkingRoute, getDistanceMeters, type NavigationStep } from '../lib/maps';
@@ -35,6 +35,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
   const lastSpeakRef = useRef<number>(0);
   const speechHelperRef = useRef<SpeechRecognitionHelper | null>(null);
   const isAnalyzingRef = useRef(false);
+  const startListeningRef = useRef<() => void>(() => {});
 
   const [view, setView] = useState<View>('dashboard');
   const [cameraOn, setCameraOn] = useState(false);
@@ -51,14 +52,15 @@ export default function Dashboard({ onExit }: DashboardProps) {
   const [currencyResult, setCurrencyResult] = useState('');
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [voiceMessage, setVoiceMessage] = useState('');
-  const [settings, setSettings] = useState<AppSettings>({
+  const [settings, setSettings] = useState<AppSettings & { voice_automation?: boolean }>({
     voice_speed: 1.0,
     voice_lang: 'en-US',
     confidence_threshold: 0.5,
     dark_mode: false,
     camera_quality: 'medium',
     navigation_mode: 'walking',
-    map_type: 'standard'
+    map_type: 'standard',
+    voice_automation: false
   });
   const [contacts, setContacts] = useState<EmergencyContact[]>([]);
   const [showSos, setShowSos] = useState(false);
@@ -104,40 +106,43 @@ export default function Dashboard({ onExit }: DashboardProps) {
   // Load settings
   useEffect(() => {
     (async () => {
-      let loadedSettings: AppSettings = {
+      let loadedSettings: AppSettings & { voice_automation?: boolean } = {
         voice_speed: 1.0,
         voice_lang: 'en-US',
         confidence_threshold: 0.5,
         dark_mode: false,
         camera_quality: 'medium',
         navigation_mode: 'walking',
-        map_type: 'standard'
+        map_type: 'standard',
+        voice_automation: false
       };
       try {
         const { data, error: fetchErr } = await supabase.from('app_settings').select('*').limit(1).maybeSingle();
         if (fetchErr) throw fetchErr;
         if (data) {
-          loadedSettings = data;
+          loadedSettings = { ...loadedSettings, ...data };
         } else {
           const { data: newSettings, error: insertErr } = await supabase.from('app_settings').insert({
             voice_speed: 1.0, voice_lang: 'en-US', confidence_threshold: 0.5, dark_mode: false, camera_quality: 'medium',
             navigation_mode: 'walking', map_type: 'standard'
           }).select().single();
           if (insertErr) throw insertErr;
-          if (newSettings) loadedSettings = newSettings;
+          if (newSettings) loadedSettings = { ...loadedSettings, ...newSettings };
         }
       } catch (e) {
         console.warn('Supabase settings query failed, falling back to localStorage:', e);
-        const localData = localStorage.getItem('visionassist_settings');
-        if (localData) {
-          try {
-            loadedSettings = JSON.parse(localData);
-          } catch {
-            console.debug('Failed to parse settings');
-          }
-        } else {
-          localStorage.setItem('visionassist_settings', JSON.stringify(loadedSettings));
+      }
+
+      const localData = localStorage.getItem('visionassist_settings');
+      if (localData) {
+        try {
+          const parsed = JSON.parse(localData);
+          loadedSettings.voice_automation = parsed.voice_automation || false;
+        } catch {
+          console.debug('Failed to parse settings');
         }
+      } else {
+        localStorage.setItem('visionassist_settings', JSON.stringify(loadedSettings));
       }
       setSettings(loadedSettings);
       configureSpeech(loadedSettings.voice_speed || 1.0, loadedSettings.voice_lang || 'en-US');
@@ -216,8 +221,22 @@ export default function Dashboard({ onExit }: DashboardProps) {
 
   const speakIfNotMuted = useCallback((text: string) => {
     setVoiceMessage(text);
-    if (!muted) speak(text);
-  }, [muted]);
+    if (!muted) {
+      if (speechHelperRef.current) {
+        speechHelperRef.current.stop();
+        setListening(false);
+      }
+      speak(text, () => {
+        if (settings.voice_automation) {
+          setTimeout(() => {
+            if (settings.voice_automation && !isSpeaking()) {
+              startListeningRef.current();
+            }
+          }, 400);
+        }
+      });
+    }
+  }, [muted, settings.voice_automation]);
 
   // Camera start
   const startCamera = useCallback(async (mode?: 'user' | 'environment') => {
@@ -248,7 +267,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
         isAnalyzingRef.current = true;
         setAnalyzing(true);
         try {
-          const result = await analyzeFrame(videoRef.current);
+          const result = await analyzeFrame(videoRef.current, undefined, settings.voice_lang);
           setVisionResult(result);
           setFps(Math.round(1000 / (1000 / (result.objects.length > 0 ? 2 : 3))));
 
@@ -258,16 +277,14 @@ export default function Dashboard({ onExit }: DashboardProps) {
             const closest = result.objects.reduce((min, o) => o.distanceMeters < min.distanceMeters ? o : min);
             lastSpeakRef.current = now;
             const msg = generateVoiceMessage(closest);
-            setVoiceMessage(msg);
-            speak(msg);
+            speakIfNotMuted(msg);
             addHistory('object', closest.class, closest.confidence, closest.distance);
           }
 
           // Obstacle warning
           if (result.warning && now - lastSpeakRef.current > 5000) {
             lastSpeakRef.current = now;
-            setVoiceMessage(result.warning);
-            if (!muted) speak(result.warning);
+            speakIfNotMuted(result.warning);
             addHistory('obstacle', result.warning, null, 'Warning');
           }
         } catch (err) {
@@ -468,7 +485,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
     setError('');
     speakIfNotMuted('Reading text.');
     try {
-      const result = await analyzeFrame(videoRef.current, 'Read all text visible in this image. Respond with a JSON object: {"text": "all readable text", "objects": [], "scene": "", "colors": [], "currency": "", "warning": ""}. If no text is visible, return empty string for text.');
+      const result = await analyzeFrame(videoRef.current, 'Read all text visible in this image. Respond with a JSON object: {"text": "all readable text", "objects": [], "scene": "", "colors": [], "currency": "", "warning": ""}. If no text is visible, return empty string for text.', settings.voice_lang);
       setOcrText(result.text);
       if (result.text) {
         speakIfNotMuted(result.text.slice(0, 200));
@@ -491,7 +508,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
     setAnalyzing(true);
     setError('');
     try {
-      const result = await analyzeFrame(videoRef.current, 'Describe this scene in one clear sentence for a visually impaired person. Respond with JSON: {"scene": "description", "objects": [], "text": "", "colors": [], "currency": "", "warning": ""}.');
+      const result = await analyzeFrame(videoRef.current, 'Describe this scene in one clear sentence for a visually impaired person. Respond with JSON: {"scene": "description", "objects": [], "text": "", "colors": [], "currency": "", "warning": ""}.', settings.voice_lang);
       setSceneText(result.scene);
       speakIfNotMuted(result.scene);
       addHistory('scene', result.scene.slice(0, 50), null, 'Scene described');
@@ -510,7 +527,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
     setAnalyzing(true);
     setError('');
     try {
-      const result = await analyzeFrame(videoRef.current, 'Identify the dominant colors in this image. Respond with JSON: {"colors": [{"name": "color name", "hex": "#rrggbb"}], "objects": [], "scene": "", "text": "", "currency": "", "warning": ""}. List up to 3 colors.');
+      const result = await analyzeFrame(videoRef.current, 'Identify the dominant colors in this image. Respond with JSON: {"colors": [{"name": "color name", "hex": "#rrggbb"}], "objects": [], "scene": "", "text": "", "currency": "", "warning": ""}. List up to 3 colors.', settings.voice_lang);
       if (result.colors.length > 0) {
         setColorResult(result.colors[0]);
         speakIfNotMuted(`The main color is ${result.colors[0].name}.`);
@@ -532,7 +549,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
     setError('');
     speakIfNotMuted('Checking currency.');
     try {
-      const result = await analyzeFrame(videoRef.current, 'Identify any currency note in this image. Look for Indian Rupee notes (10, 20, 50, 100, 200, 500, 2000). Respond with JSON: {"currency": "value like 500 rupees or empty string", "objects": [], "scene": "", "text": "", "colors": [], "warning": ""}.');
+      const result = await analyzeFrame(videoRef.current, 'Identify any currency note in this image. Look for Indian Rupee notes (10, 20, 50, 100, 200, 500, 2000). Respond with JSON: {"currency": "value like 500 rupees or empty string", "objects": [], "scene": "", "text": "", "colors": [], "warning": ""}.', settings.voice_lang);
       setCurrencyResult(result.currency);
       if (result.currency) {
         speakIfNotMuted(`This is ${result.currency}.`);
@@ -555,7 +572,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
     setAnalyzing(true);
     setError('');
     try {
-      const result = await analyzeFrame(videoRef.current, 'Describe any people visible in this image. Count them and note their position. Respond with JSON: {"scene": "description of people", "objects": [{"class": "person", "confidence": 0.9, "position": "center", "distance": "Medium", "distanceMeters": 2}], "text": "", "colors": [], "currency": "", "warning": ""}.');
+      const result = await analyzeFrame(videoRef.current, 'Describe any people visible in this image. Count them and note their position. Respond with JSON: {"scene": "description of people", "objects": [{"class": "person", "confidence": 0.9, "position": "center", "distance": "Medium", "distanceMeters": 2}], "text": "", "colors": [], "currency": "", "warning": ""}.', settings.voice_lang);
       const hasPerson = result.objects.some((o) => o.class === 'person');
       if (hasPerson) {
         const names = ['Rahul', 'Priya', 'Amit', 'Sneha'];
@@ -573,86 +590,270 @@ export default function Dashboard({ onExit }: DashboardProps) {
     setAnalyzing(false);
   }, [speakIfNotMuted, addHistory]);
 
-  // Voice commands
+  // Continuous Voice command controller
+  const startContinuousListening = useCallback(() => {
+    if (!speechHelperRef.current || !speechHelperRef.current.isSupported() || isSpeaking()) {
+      return;
+    }
+    setListening(true);
+    speechHelperRef.current.start(
+      (transcript) => {
+        setListening(false);
+        const cmd = transcript.toLowerCase();
+        
+        // Map regional translations to triggers
+        let normalizedCmd = cmd;
+        if (cmd.includes('चेहरा') || cmd.includes('फेस') || cmd.includes('முகம்') || cmd.includes('ಮುಖ')) {
+          normalizedCmd += ' face';
+        }
+        if (cmd.includes('पढ़ें') || cmd.includes('पढ़ें') || cmd.includes('टेक्स्ट') || cmd.includes('வாசி') || cmd.includes('ಓದು') || cmd.includes('ಚಹರೆ')) {
+          normalizedCmd += ' read';
+        }
+        if (cmd.includes('वर्णನ') || cmd.includes('दृश्य') || cmd.includes('ವಿಳಕ್ಕು') || cmd.includes('ವಿವರಿಸು') || cmd.includes('ದೃಶ್ಯ')) {
+          normalizedCmd += ' describe';
+        }
+        if (cmd.includes('रंग') || cmd.includes('நிறம்') || cmd.includes('రంగు') || cmd.includes('ಬಣ್ಣ')) {
+          normalizedCmd += ' color';
+        }
+        if (cmd.includes('पैसे') || cmd.includes('रुपये') || cmd.includes('பணம்') || cmd.includes('డబ్బు') || cmd.includes('ಹಣ')) {
+          normalizedCmd += ' currency';
+        }
+        if (cmd.includes('रोकें') || cmd.includes('बंद') || cmd.includes('நிறுத்து') || cmd.includes('ఆపు') || cmd.includes('ನಿಲ್ಲಿಸು')) {
+          normalizedCmd += ' stop';
+        }
+        if (cmd.includes('नेविगेट') || cmd.includes('रास्ता') || cmd.includes('வழி') || cmd.includes('ಮಾರ್ಗ')) {
+          normalizedCmd += ' navigate';
+        }
+
+        console.log(`Continuous Voice Command: "${transcript}" -> "${normalizedCmd}"`);
+
+        // Voice Navigation Commands parsing
+        if (normalizedCmd.includes('take me to') || normalizedCmd.includes('navigate to') || normalizedCmd.includes('go to')) {
+          const match = normalizedCmd.match(/(?:take me to|navigate to|go to)\s+(.+)/);
+          if (match && match[1]) {
+            startRouteNavigation(match[1].trim());
+          }
+        } else if (normalizedCmd.includes('find nearest') || normalizedCmd.includes('nearest')) {
+          const match = normalizedCmd.match(/(?:find nearest|nearest)\s+(.+)/);
+          if (match && match[1]) {
+            findNearestPlace(match[1].trim());
+          }
+        } else if (normalizedCmd.includes('cancel navigation') || normalizedCmd.includes('stop navigation')) {
+          setNavActive(false);
+          setDestinationCoords(null);
+          setRouteCoords([]);
+          setRouteSteps([]);
+          setSimulatedLoc(null);
+          setIsSimulatingWalk(false);
+          speakIfNotMuted('Navigation stopped.');
+          addHistory('navigation', 'Stopped', null, 'Cancelled');
+        } else if (normalizedCmd.includes('pause navigation')) {
+          setNavActive(false);
+          speakIfNotMuted('Navigation paused.');
+        } else if (normalizedCmd.includes('resume navigation')) {
+          if (routeCoords.length > 0) {
+            setNavActive(true);
+            speakIfNotMuted('Resuming navigation.');
+          } else {
+            speakIfNotMuted('No active route to resume.');
+          }
+        } else if (normalizedCmd.includes('how far')) {
+          if (routeCoords.length > 0) {
+            speakIfNotMuted(`Destination is ${distanceRemaining} meters away, about ${etaMinutes} minutes walking.`);
+          } else {
+            speakIfNotMuted('No active navigation route.');
+          }
+        } else if (normalizedCmd.includes('what is my next turn') || normalizedCmd.includes('next turn')) {
+          if (routeCoords.length > 0 && routeSteps[navStep]) {
+            speakIfNotMuted(`Your next turn is: ${routeSteps[navStep].instruction}`);
+          } else {
+            speakIfNotMuted('No active navigation route.');
+          }
+        } else if (normalizedCmd.includes('repeat instruction')) {
+          if (routeCoords.length > 0 && routeSteps[Math.max(0, navStep - 1)]) {
+            speakIfNotMuted(routeSteps[Math.max(0, navStep - 1)].instruction);
+          } else {
+            speakIfNotMuted('No instructions to repeat.');
+          }
+        } else if (normalizedCmd.includes('what') && normalizedCmd.includes('front')) {
+          handleScene();
+        } else if (normalizedCmd.includes('read') || normalizedCmd.includes('ocr')) {
+          handleOCR();
+        } else if (normalizedCmd.includes('describe') || normalizedCmd.includes('scene')) {
+          handleScene();
+        } else if (normalizedCmd.includes('color')) {
+          handleColor();
+        } else if (normalizedCmd.includes('currency') || normalizedCmd.includes('money')) {
+          handleCurrency();
+        } else if (normalizedCmd.includes('face') || normalizedCmd.includes('person')) {
+          handleFace();
+        } else if (normalizedCmd.includes('stop')) {
+          stopSpeaking();
+          setVoiceMessage('');
+        } else if (normalizedCmd.includes('start') && normalizedCmd.includes('camera')) {
+          if (!cameraOn) startCamera();
+        } else {
+          speakIfNotMuted(`Command: ${transcript}. Not recognized.`);
+        }
+        addHistory('voice', transcript, null, 'Voice command');
+      },
+      () => {
+        setListening(false);
+        if (settings.voice_automation && !isSpeaking()) {
+          setTimeout(() => {
+            if (settings.voice_automation && !isSpeaking()) {
+              startListeningRef.current();
+            }
+          }, 300);
+        }
+      }
+    );
+  }, [settings.voice_lang, settings.voice_automation, isSpeaking, handleScene, handleOCR, handleColor, handleCurrency, handleFace, cameraOn, startCamera, speakIfNotMuted, addHistory, startRouteNavigation, findNearestPlace, routeCoords, routeSteps, navStep, distanceRemaining, etaMinutes]);
+
+  // Sync ref to break circular dependency
+  useEffect(() => {
+    startListeningRef.current = startContinuousListening;
+  }, [startContinuousListening]);
+
+  // Automatic voice command initialization background loop
+  useEffect(() => {
+    if (settings.voice_automation) {
+      setTimeout(() => {
+        if (settings.voice_automation && !isSpeaking()) {
+          startContinuousListening();
+        }
+      }, 500);
+    } else {
+      if (speechHelperRef.current) {
+        speechHelperRef.current.stop();
+        setListening(false);
+      }
+    }
+    return () => {
+      if (speechHelperRef.current) {
+        speechHelperRef.current.stop();
+      }
+    };
+  }, [settings.voice_automation, startContinuousListening]);
+
+  // Standard Voice manual trigger callback
   const handleVoiceCommand = useCallback(() => {
     if (!speechHelperRef.current?.isSupported()) {
       speakIfNotMuted('Voice recognition not supported in this browser.');
       return;
     }
+    if (settings.voice_automation) {
+      // Toggle off automation if clicked
+      setSettings(s => {
+        const next = { ...s, voice_automation: false };
+        localStorage.setItem('visionassist_settings', JSON.stringify(next));
+        return next;
+      });
+      speakIfNotMuted('Automatic voice control disabled.');
+      return;
+    }
+    
+    // Single prompt start
     setListening(true);
-    speechHelperRef.current.start((transcript) => {
-      setListening(false);
-      const cmd = transcript.toLowerCase();
+    speechHelperRef.current.start(
+      (transcript) => {
+        setListening(false);
+        const cmd = transcript.toLowerCase();
+        
+        let normalizedCmd = cmd;
+        if (cmd.includes('चेहरा') || cmd.includes('फेस') || cmd.includes('முகம்')) {
+          normalizedCmd += ' face';
+        }
+        if (cmd.includes('पढ़ें') || cmd.includes('टेक्स्ट') || cmd.includes('வாசி')) {
+          normalizedCmd += ' read';
+        }
+        if (cmd.includes('वर्णन') || cmd.includes('दृश्य') || cmd.includes('விளக்கு')) {
+          normalizedCmd += ' describe';
+        }
+        if (cmd.includes('रंग') || cmd.includes('நிறம்') || cmd.includes('రంగు')) {
+          normalizedCmd += ' color';
+        }
+        if (cmd.includes('पैसे') || cmd.includes('रुपये') || cmd.includes('பணம்') || cmd.includes('డబ్బు')) {
+          normalizedCmd += ' currency';
+        }
+        if (cmd.includes('रोकें') || cmd.includes('बंद') || cmd.includes('நிறுத்து') || cmd.includes('ఆపు')) {
+          normalizedCmd += ' stop';
+        }
 
-      // Voice Navigation Commands parsing
-      if (cmd.includes('take me to') || cmd.includes('navigate to') || cmd.includes('go to')) {
-        const match = cmd.match(/(?:take me to|navigate to|go to)\s+(.+)/);
-        if (match && match[1]) {
-          startRouteNavigation(match[1].trim());
-        }
-      } else if (cmd.includes('find nearest') || cmd.includes('nearest')) {
-        const match = cmd.match(/(?:find nearest|nearest)\s+(.+)/);
-        if (match && match[1]) {
-          findNearestPlace(match[1].trim());
-        }
-      } else if (cmd.includes('cancel navigation') || cmd.includes('stop navigation')) {
-        setNavActive(false);
-        setDestinationCoords(null);
-        setRouteCoords([]);
-        setRouteSteps([]);
-        setSimulatedLoc(null);
-        setIsSimulatingWalk(false);
-        speakIfNotMuted('Navigation stopped.');
-        addHistory('navigation', 'Stopped', null, 'Cancelled');
-      } else if (cmd.includes('pause navigation')) {
-        setNavActive(false);
-        speakIfNotMuted('Navigation paused.');
-      } else if (cmd.includes('resume navigation')) {
-        if (routeCoords.length > 0) {
-          setNavActive(true);
-          speakIfNotMuted('Resuming navigation.');
+        if (normalizedCmd.includes('take me to') || normalizedCmd.includes('navigate to') || normalizedCmd.includes('go to')) {
+          const match = normalizedCmd.match(/(?:take me to|navigate to|go to)\s+(.+)/);
+          if (match && match[1]) {
+            startRouteNavigation(match[1].trim());
+          }
+        } else if (normalizedCmd.includes('find nearest') || normalizedCmd.includes('nearest')) {
+          const match = normalizedCmd.match(/(?:find nearest|nearest)\s+(.+)/);
+          if (match && match[1]) {
+            findNearestPlace(match[1].trim());
+          }
+        } else if (normalizedCmd.includes('cancel navigation') || normalizedCmd.includes('stop navigation')) {
+          setNavActive(false);
+          setDestinationCoords(null);
+          setRouteCoords([]);
+          setRouteSteps([]);
+          setSimulatedLoc(null);
+          setIsSimulatingWalk(false);
+          speakIfNotMuted('Navigation stopped.');
+          addHistory('navigation', 'Stopped', null, 'Cancelled');
+        } else if (normalizedCmd.includes('pause navigation')) {
+          setNavActive(false);
+          speakIfNotMuted('Navigation paused.');
+        } else if (normalizedCmd.includes('resume navigation')) {
+          if (routeCoords.length > 0) {
+            setNavActive(true);
+            speakIfNotMuted('Resuming navigation.');
+          } else {
+            speakIfNotMuted('No active route to resume.');
+          }
+        } else if (normalizedCmd.includes('how far')) {
+          if (routeCoords.length > 0) {
+            speakIfNotMuted(`Destination is ${distanceRemaining} meters away, about ${etaMinutes} minutes walking.`);
+          } else {
+            speakIfNotMuted('No active navigation route.');
+          }
+        } else if (normalizedCmd.includes('what is my next turn') || normalizedCmd.includes('next turn')) {
+          if (routeCoords.length > 0 && routeSteps[navStep]) {
+            speakIfNotMuted(`Your next turn is: ${routeSteps[navStep].instruction}`);
+          } else {
+            speakIfNotMuted('No active navigation route.');
+          }
+        } else if (normalizedCmd.includes('repeat instruction')) {
+          if (routeCoords.length > 0 && routeSteps[Math.max(0, navStep - 1)]) {
+            speakIfNotMuted(routeSteps[Math.max(0, navStep - 1)].instruction);
+          } else {
+            speakIfNotMuted('No instructions to repeat.');
+          }
+        } else if (normalizedCmd.includes('what') && normalizedCmd.includes('front')) {
+          handleScene();
+        } else if (normalizedCmd.includes('read') || normalizedCmd.includes('ocr')) {
+          handleOCR();
+        } else if (normalizedCmd.includes('describe') || normalizedCmd.includes('scene')) {
+          handleScene();
+        } else if (normalizedCmd.includes('color')) {
+          handleColor();
+        } else if (normalizedCmd.includes('currency') || normalizedCmd.includes('money')) {
+          handleCurrency();
+        } else if (normalizedCmd.includes('face') || normalizedCmd.includes('person')) {
+          handleFace();
+        } else if (normalizedCmd.includes('stop')) {
+          stopSpeaking();
+          setVoiceMessage('');
+        } else if (normalizedCmd.includes('start') && normalizedCmd.includes('camera')) {
+          if (!cameraOn) startCamera();
         } else {
-          speakIfNotMuted('No active route to resume.');
+          speakIfNotMuted(`Command: ${transcript}. Not recognized.`);
         }
-      } else if (cmd.includes('how far')) {
-        if (routeCoords.length > 0) {
-          speakIfNotMuted(`Destination is ${distanceRemaining} meters away, about ${etaMinutes} minutes walking.`);
-        } else {
-          speakIfNotMuted('No active navigation route.');
-        }
-      } else if (cmd.includes('what is my next turn') || cmd.includes('next turn')) {
-        if (routeCoords.length > 0 && routeSteps[navStep]) {
-          speakIfNotMuted(`Your next turn is: ${routeSteps[navStep].instruction}`);
-        } else {
-          speakIfNotMuted('No active navigation route.');
-        }
-      } else if (cmd.includes('repeat instruction')) {
-        if (routeCoords.length > 0 && routeSteps[Math.max(0, navStep - 1)]) {
-          speakIfNotMuted(routeSteps[Math.max(0, navStep - 1)].instruction);
-        } else {
-          speakIfNotMuted('No instructions to repeat.');
-        }
-      } else if (cmd.includes('what') && cmd.includes('front')) {
-        handleScene();
-      } else if (cmd.includes('read')) {
-        handleOCR();
-      } else if (cmd.includes('describe') || cmd.includes('scene')) {
-        handleScene();
-      } else if (cmd.includes('color')) {
-        handleColor();
-      } else if (cmd.includes('currency') || cmd.includes('money')) {
-        handleCurrency();
-      } else if (cmd.includes('stop')) {
-        stopSpeaking();
-        setVoiceMessage('');
-      } else if (cmd.includes('start') && cmd.includes('camera')) {
-        if (!cameraOn) startCamera();
-      } else {
-        speakIfNotMuted(`Command: ${transcript}. Not recognized.`);
+        addHistory('voice', transcript, null, 'Voice command');
+      },
+      () => {
+        setListening(false);
       }
-      addHistory('voice', transcript, null, 'Voice command');
-    });
-  }, [handleScene, handleOCR, handleColor, handleCurrency, cameraOn, startCamera, speakIfNotMuted, addHistory, startRouteNavigation, findNearestPlace, routeCoords, routeSteps, navStep, distanceRemaining, etaMinutes]);
+    );
+  }, [handleScene, handleOCR, handleColor, handleCurrency, handleFace, cameraOn, startCamera, speakIfNotMuted, addHistory, startRouteNavigation, findNearestPlace, routeCoords, routeSteps, navStep, distanceRemaining, etaMinutes, settings.voice_automation]);
 
   // SOS
   const handleSos = useCallback(async () => {
@@ -770,6 +971,11 @@ export default function Dashboard({ onExit }: DashboardProps) {
               </div>
             </div>
             <div className="flex items-center gap-2">
+              {settings.voice_automation && (
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-success-500/10 text-success-600 border border-success-500/20 text-xs font-semibold animate-pulse">
+                  <Mic className="w-3.5 h-3.5" /> AUTO VOICE
+                </div>
+              )}
               <button onClick={() => setView('admin')} className="p-2 rounded-lg hover:bg-slate-100 transition-colors" title="Admin">
                 <BarChart3 className="w-5 h-5 text-slate-600" />
               </button>
@@ -903,7 +1109,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
                   { id: 'color', icon: Palette, label: 'Color', action: handleColor },
                   { id: 'currency', icon: DollarSign, label: 'Currency', action: handleCurrency },
                   { id: 'face', icon: ScanFace, label: 'Face', action: handleFace },
-                  { id: 'voice', icon: Mic, label: listening ? 'Listening...' : 'Voice', action: handleVoiceCommand },
+                  { id: 'voice', icon: Mic, label: listening ? 'Listening...' : settings.voice_automation ? 'Auto Voice' : 'Voice', action: handleVoiceCommand },
                 ].map((f) => (
                   <button
                     key={f.id}
@@ -1377,22 +1583,23 @@ function AdminView({ onBack, history, fps }: { onBack: () => void; history: Hist
 // Settings View
 function SettingsView({ onBack, settings, setSettings, contacts, setContacts }: {
   onBack: () => void;
-  settings: AppSettings;
-  setSettings: (s: AppSettings) => void;
+  settings: AppSettings & { voice_automation?: boolean };
+  setSettings: (s: AppSettings & { voice_automation?: boolean }) => void;
   contacts: EmergencyContact[];
   setContacts: (c: EmergencyContact[]) => void;
 }) {
-  const [local, setLocal] = useState<AppSettings>(settings);
+  const [local, setLocal] = useState<AppSettings & { voice_automation?: boolean }>(settings);
   const [newContact, setNewContact] = useState({ name: '', phone: '', relation: '' });
 
   const save = async () => {
     localStorage.setItem('visionassist_settings', JSON.stringify(local));
     try {
       const { data } = await supabase.from('app_settings').select('id').limit(1).maybeSingle();
+      const { voice_automation, ...dbSettings } = local;
       if (data?.id) {
-        await supabase.from('app_settings').update({ ...local, updated_at: new Date().toISOString() }).eq('id', data.id);
+        await supabase.from('app_settings').update({ ...dbSettings, updated_at: new Date().toISOString() }).eq('id', data.id);
       } else {
-        await supabase.from('app_settings').insert(local);
+        await supabase.from('app_settings').insert(dbSettings);
       }
     } catch (e) {
       console.warn('Failed to save settings to Supabase:', e);
@@ -1469,7 +1676,21 @@ function SettingsView({ onBack, settings, setSettings, contacts, setContacts }: 
                   <option value="hi-IN">Hindi (India)</option>
                   <option value="ta-IN">Tamil (India)</option>
                   <option value="te-IN">Telugu (India)</option>
+                  <option value="kn-IN">Kannada (India)</option>
+                  <option value="bn-IN">Bengali (India)</option>
                 </select>
+              </div>
+              <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50 border border-slate-100 mt-2">
+                <div>
+                  <label className="text-sm font-semibold text-slate-700 block">Automatic Voice Control</label>
+                  <span className="text-xs text-slate-400">System listens automatically for voice commands</span>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={local.voice_automation || false}
+                  onChange={(e) => setLocal({ ...local, voice_automation: e.target.checked })}
+                  className="w-5 h-5 accent-primary-600 rounded cursor-pointer"
+                />
               </div>
             </div>
           </div>

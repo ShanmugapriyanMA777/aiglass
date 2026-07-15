@@ -13,7 +13,7 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const { image, prompt } = await req.json();
+    const { image, prompt, lang } = await req.json();
 
     if (!image) {
       return new Response(
@@ -52,6 +52,27 @@ Deno.serve(async (req: Request) => {
 }
 Detect up to 8 objects. Use lowercase class names. Estimate distance from object size. Be concise.`;
 
+    let activePrompt = prompt || defaultPrompt;
+    if (lang && !lang.toLowerCase().startsWith('en')) {
+      const langNames: Record<string, string> = {
+        'hi': 'Hindi',
+        'ta': 'Tamil',
+        'te': 'Telugu',
+        'kn': 'Kannada',
+        'ml': 'Malayalam',
+        'bn': 'Bengali'
+      };
+      const shortLang = lang.split('-')[0].toLowerCase();
+      const langName = langNames[shortLang] || shortLang;
+      activePrompt += `\n\nCRITICAL LANGUAGE REQUIREMENT: The user's preferred language is ${langName} (${lang}). You MUST translate all human-readable string values in the JSON output into ${langName} (using the correct regional script, e.g. Devanagari for Hindi, Tamil script for Tamil, etc.). This includes translation of:
+- The 'scene' description string
+- The 'text' string (translate any English text read in the image to ${langName} or represent it in ${langName})
+- The 'warning' obstacle warning string
+- The object 'class' names in the 'objects' array (translate them to standard ${langName} terms, e.g., 'chair' to 'कुर्सी' in Hindi, 'person' to 'व्यक्ति', etc.)
+- The 'currency' string (e.g. '500 रुपये')
+Do NOT translate the JSON keys (e.g. keep keys like "objects", "class", "confidence", "position", "distance", "scene", "text", "colors", "currency", "warning" in English). The response MUST still be valid JSON.`;
+    }
+
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -66,7 +87,7 @@ Detect up to 8 objects. Use lowercase class names. Estimate distance from object
           {
             role: "user",
             content: [
-              { type: "text", text: prompt || defaultPrompt },
+              { type: "text", text: activePrompt },
               { type: "image_url", image_url: { url: image } },
             ],
           },
