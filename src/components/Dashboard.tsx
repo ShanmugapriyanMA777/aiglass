@@ -1590,6 +1590,26 @@ function SettingsView({ onBack, settings, setSettings, contacts, setContacts }: 
 }) {
   const [local, setLocal] = useState<AppSettings & { voice_automation?: boolean }>(settings);
   const [newContact, setNewContact] = useState({ name: '', phone: '', relation: '' });
+  const [openRouterKey, setOpenRouterKey] = useState('');
+  const [isKeyConfigured, setIsKeyConfigured] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data, error } = await supabase
+          .from('app_config')
+          .select('value')
+          .eq('key', 'OPENROUTER_API_KEY')
+          .maybeSingle();
+        if (data?.value) {
+          setIsKeyConfigured(true);
+          setOpenRouterKey('••••••••••••••••');
+        }
+      } catch (e) {
+        console.warn('Failed to load OpenRouter API key:', e);
+      }
+    })();
+  }, []);
 
   const save = async () => {
     localStorage.setItem('visionassist_settings', JSON.stringify(local));
@@ -1601,8 +1621,21 @@ function SettingsView({ onBack, settings, setSettings, contacts, setContacts }: 
       } else {
         await supabase.from('app_settings').insert(dbSettings);
       }
+
+      // Save or clear OpenRouter key
+      if (openRouterKey === '') {
+        await supabase
+          .from('app_config')
+          .delete()
+          .eq('key', 'OPENROUTER_API_KEY');
+      } else if (openRouterKey && openRouterKey !== '••••••••••••••••') {
+        const { error } = await supabase
+          .from('app_config')
+          .upsert({ key: 'OPENROUTER_API_KEY', value: openRouterKey }, { onConflict: 'key' });
+        if (error) throw error;
+      }
     } catch (e) {
-      console.warn('Failed to save settings to Supabase:', e);
+      console.warn('Failed to save settings/config to Supabase:', e);
     }
     setSettings(local);
     configureSpeech(local.voice_speed || 1.0, local.voice_lang || 'en-US');
@@ -1771,6 +1804,34 @@ function SettingsView({ onBack, settings, setSettings, contacts, setContacts }: 
                 onChange={(e) => setNewContact({ ...newContact, phone: e.target.value })}
                 className="px-3 py-2 text-sm rounded-lg border border-slate-200 focus:border-primary-300 focus:outline-none" />
               <button onClick={addContact} className="px-3 py-2 text-sm rounded-lg bg-primary-600 text-white font-medium">Add</button>
+            </div>
+          </div>
+
+          {/* AI API Configuration */}
+          <div className="bg-white rounded-2xl p-6 card-shadow border border-slate-100">
+            <h3 className="font-bold text-slate-700 mb-4 flex items-center gap-2">
+              <Brain className="w-5 h-5 text-primary-600" /> AI API Configuration
+            </h3>
+            <div className="space-y-4">
+              <div>
+                <label className="text-sm font-medium text-slate-600 block mb-2">
+                  OpenRouter API Key
+                </label>
+                <div className="relative">
+                  <input
+                    type="password"
+                    placeholder="Enter sk-or-..."
+                    value={openRouterKey}
+                    onChange={(e) => setOpenRouterKey(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-primary-300 focus:outline-none"
+                  />
+                </div>
+                <span className="text-xs text-slate-400 mt-1 block">
+                  {isKeyConfigured
+                    ? "✓ API Key is currently configured in the database. Enter a new key to overwrite it."
+                    : "No API Key configured. The system will fall back to local client-side analysis."}
+                </span>
+              </div>
             </div>
           </div>
 
