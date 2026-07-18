@@ -7,7 +7,7 @@ import {
   Play, Square, Clock, TrendingUp, Zap, Brain, Target,
   CheckCircle2, AlertCircle, Loader2, ScanFace, RefreshCw, Shield,
 } from 'lucide-react';
-import { analyzeFrame, generateVoiceMessage, drawBoundingBoxes, getLocalModel, type VisionResult } from '../lib/detection';
+import { analyzeFrame, drawBoundingBoxes, getLocalModel, type VisionResult } from '../lib/detection';
 import { speak, stopSpeaking, configureSpeech, SpeechRecognitionHelper, isSpeaking } from '../lib/speech';
 import { supabase, type AppSettings, type EmergencyContact, type DetectionRecord, type ActivityLogEntry, type DetectionType } from '../lib/supabase';
 import MapPanel from './MapPanel';
@@ -33,7 +33,6 @@ export default function Dashboard({ onExit }: DashboardProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const analysisTimerRef = useRef<number>(0);
-  const lastSpeakRef = useRef<number>(0);
   const speechHelperRef = useRef<SpeechRecognitionHelper | null>(null);
   const isAnalyzingRef = useRef(false);
   const startListeningRef = useRef<() => void>(() => {});
@@ -300,165 +299,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
     return () => clearInterval(interval);
   }, [speakIfNotMuted]);
 
-  // Obstacle alerts tracking helper
-  const processObstacleAlerts = useCallback((objects: any[]) => {
-    const priorityClasses = ['vehicle', 'car', 'bus', 'truck', 'motorcycle', 'bicycle', 'person', 'pole', 'stairs', 'staircase', 'chair', 'backpack', 'bottle'];
-    const dangerousObjects = objects.filter(o => o.distanceMeters <= 3.5);
-    if (dangerousObjects.length === 0) return;
 
-    // Sort by priority class index then by closest distance
-    dangerousObjects.sort((a, b) => {
-      const idxA = priorityClasses.indexOf(a.class.toLowerCase());
-      const idxB = priorityClasses.indexOf(b.class.toLowerCase());
-      const priorityA = idxA !== -1 ? idxA : 999;
-      const priorityB = idxB !== -1 ? idxB : 999;
-      if (priorityA !== priorityB) return priorityA - priorityB;
-      return a.distanceMeters - b.distanceMeters;
-    });
-
-    const now = Date.now();
-    const primary = dangerousObjects[0];
-    const key = primary.class.toLowerCase();
-    const lastSpoken = lastSpokenObstaclesRef.current[key];
-
-    const needsAnnounce = 
-      !lastSpoken || 
-      (now - lastSpoken.timestamp > 15000) || 
-      (lastSpoken.position !== primary.position) || 
-      (Math.abs(lastSpoken.distanceMeters - primary.distanceMeters) >= 0.6);
-
-    if (needsAnnounce) {
-      lastSpokenObstaclesRef.current[key] = {
-        distanceMeters: primary.distanceMeters,
-        position: primary.position,
-        timestamp: now
-      };
-      const posText = primary.position === 'center' ? 'in front of you' : `on your ${primary.position}`;
-      const distText = primary.distanceMeters <= 1 ? 'very close' : `${primary.distanceMeters} meters away`;
-      const msg = `${primary.class} ${posText}, ${distText}.`;
-      speakIfNotMuted(msg);
-      addHistory('obstacle', msg, null, 'Alert');
-    }
-  }, [speakIfNotMuted, addHistory]);
-
-  // OCR Auto Trigger Helper
-  const processAutonomousOcrTrigger = useCallback((predictions: any[]) => {
-    const ocrTargetClasses = ['book', 'cell phone', 'stop sign', 'bottle', 'backpack', 'tie'];
-    const hasOcrTarget = predictions.some(pred => {
-      const isTarget = ocrTargetClasses.includes(pred.class.toLowerCase());
-      const score = pred.score !== undefined ? pred.score : 1.0;
-      return isTarget && score > 0.6;
-    });
-
-    const now = Date.now();
-    if (hasOcrTarget && now - lastOcrTimeRef.current > 20000) {
-      lastOcrTimeRef.current = now;
-      handleOCR();
-    }
-  }, [handleOCR]);
-
-  // Live fast local detection loop (20+ FPS)
-  useEffect(() => {
-    if (!cameraOn || !videoRef.current || !canvasRef.current) {
-      if (localDetectionLoopRef.current) {
-        cancelAnimationFrame(localDetectionLoopRef.current);
-        localDetectionLoopRef.current = null;
-      }
-      return;
-    }
-
-    let frameCount = 0;
-    let fpsInterval = setInterval(() => {
-      setFps(frameCount);
-      frameCount = 0;
-    }, 1000);
-
-    const runLocalDetection = async () => {
-      if (!videoRef.current || !canvasRef.current) return;
-      
-      if (videoRef.current.readyState === videoRef.current.HAVE_ENOUGH_DATA) {
-        try {
-          if (typeof window !== 'undefined' && (window as any).cocoSsd) {
-            const model = await getLocalModel();
-            const predictions = await model.detect(videoRef.current);
-            
-            drawBoundingBoxes(predictions, canvasRef.current, videoRef.current, settings.confidence_threshold);
-
-            if (predictions.length > 0) {
-              const mapped = predictions.map((pred: any) => {
-                const [x, , w, h] = pred.bbox;
-                const centerX = x + w / 2;
-                const videoWidth = videoRef.current?.videoWidth || 640;
-                const videoHeight = videoRef.current?.videoHeight || 480;
-
-                let position: 'left' | 'center' | 'right' = 'center';
-                if (centerX < videoWidth * 0.35) position = 'left';
-                else if (centerX > videoWidth * 0.65) position = 'right';
-
-                const relativeHeight = h / videoHeight;
-                const distanceMeters = Math.min(10, Math.max(0.3, Math.round((0.5 / relativeHeight) * 10) / 10));
-
-                let distance = 'Far';
-                if (distanceMeters <= 1.2) distance = 'Very close';
-                else if (distanceMeters <= 2.2) distance = 'Close';
-                else if (distanceMeters <= 4.2) distance = 'Medium';
-
-                let className = pred.class;
-                if (className === 'person' && registeredFaces.length > 0) {
-                  className = registeredFaces[0];
-                }
-
-                return {
-                  class: className,
-                  confidence: pred.score,
-                  position,
-                  distance,
-                  distanceMeters,
-                  bbox: pred.bbox
-                };
-              });
-
-              setVisionResult(prev => ({
-                objects: mapped,
-                scene: prev?.scene || '',
-                text: prev?.text || '',
-                colors: prev?.colors || [],
-                currency: prev?.currency || '',
-                warning: prev?.warning || ''
-              }));
-
-              processObstacleAlerts(mapped);
-              processAutonomousOcrTrigger(predictions);
-            } else {
-              setVisionResult(prev => ({
-                objects: [],
-                scene: prev?.scene || '',
-                text: prev?.text || '',
-                colors: prev?.colors || [],
-                currency: prev?.currency || '',
-                warning: ''
-              }));
-            }
-          }
-        } catch (e) {
-          console.error("Local fast detection loop error:", e);
-        }
-      }
-
-      frameCount++;
-      localDetectionLoopRef.current = requestAnimationFrame(runLocalDetection);
-    };
-
-    runLocalDetection();
-
-    return () => {
-      clearInterval(fpsInterval);
-      if (localDetectionLoopRef.current) {
-        cancelAnimationFrame(localDetectionLoopRef.current);
-        localDetectionLoopRef.current = null;
-      }
-    };
-  }, [cameraOn, settings.confidence_threshold, registeredFaces, processObstacleAlerts, processAutonomousOcrTrigger]);
 
   // Camera start
   const startCamera = useCallback(async (mode?: 'user' | 'environment') => {
@@ -823,6 +664,228 @@ export default function Dashboard({ onExit }: DashboardProps) {
     setAnalyzing(false);
   }, [speakIfNotMuted, addHistory]);
 
+
+
+  // SOS
+  const handleSos = useCallback(async () => {
+    setShowSos(true);
+    setSosSent(false);
+
+    // Cancel current navigation
+    setNavActive(false);
+    setDestinationCoords(null);
+    setRouteCoords([]);
+    setRouteSteps([]);
+    setSimulatedLoc(null);
+    setIsSimulatingWalk(false);
+
+    navigator.geolocation?.getCurrentPosition(
+      async (pos) => {
+        const { latitude, longitude } = pos.coords;
+        const message = `EMERGENCY: VisionAssist user needs help. Location: ${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
+        try {
+          await supabase.from('activity_log').insert({ event: 'sos', details: { message, location: { latitude, longitude } } });
+        } catch (e) {
+          console.warn('Failed to log SOS activity to Supabase:', e);
+        }
+        setSosSent(true);
+        speakIfNotMuted('Emergency activated. Location shared. Calling emergency contact.');
+
+        // Automatically map route to nearest hospital
+        try {
+          const places = await searchPlaces('hospital', latitude, longitude);
+          if (places.length > 0) {
+            const nearestHosp = places[0];
+            setDestinationCoords([nearestHosp.latitude, nearestHosp.longitude]);
+            const route = await getWalkingRoute([latitude, longitude], [nearestHosp.latitude, nearestHosp.longitude]);
+            setRouteCoords(route.coordinates);
+            setRouteSteps(route.steps);
+            setNavDestination(nearestHosp.name.split(',')[0]);
+            setDistanceRemaining(route.distance);
+            setEtaMinutes(Math.ceil(route.duration / 60));
+            setNavActive(true);
+            setIsSimulatingWalk(true);
+            setNavStep(0);
+            setSimulatedLoc([latitude, longitude]);
+            setCurrentRoadName(route.steps[0]?.instruction || 'Routing to medical facility');
+            speakIfNotMuted(`Routing emergency navigation to closest hospital: ${nearestHosp.name.split(',')[0]}`);
+          }
+        } catch (err) {
+          console.warn('Emergency hospital routing failed:', err);
+        }
+      },
+      async () => {
+        try {
+          await supabase.from('activity_log').insert({ event: 'sos', details: { message: 'Location unavailable' } });
+        } catch (e) {
+          console.warn('Failed to log SOS activity to Supabase:', e);
+        }
+        setSosSent(true);
+        speakIfNotMuted('Emergency alert sent. Location unavailable.');
+      }
+    );
+  }, [speakIfNotMuted]);
+
+  // Obstacle alerts tracking helper
+  const processObstacleAlerts = useCallback((objects: any[]) => {
+    const priorityClasses = ['vehicle', 'car', 'bus', 'truck', 'motorcycle', 'bicycle', 'person', 'pole', 'stairs', 'staircase', 'chair', 'backpack', 'bottle'];
+    const dangerousObjects = objects.filter(o => o.distanceMeters <= 3.5);
+    if (dangerousObjects.length === 0) return;
+
+    // Sort by priority class index then by closest distance
+    dangerousObjects.sort((a, b) => {
+      const idxA = priorityClasses.indexOf(a.class.toLowerCase());
+      const idxB = priorityClasses.indexOf(b.class.toLowerCase());
+      const priorityA = idxA !== -1 ? idxA : 999;
+      const priorityB = idxB !== -1 ? idxB : 999;
+      if (priorityA !== priorityB) return priorityA - priorityB;
+      return a.distanceMeters - b.distanceMeters;
+    });
+
+    const now = Date.now();
+    const primary = dangerousObjects[0];
+    const key = primary.class.toLowerCase();
+    const lastSpoken = lastSpokenObstaclesRef.current[key];
+
+    const needsAnnounce = 
+      !lastSpoken || 
+      (now - lastSpoken.timestamp > 15000) || 
+      (lastSpoken.position !== primary.position) || 
+      (Math.abs(lastSpoken.distanceMeters - primary.distanceMeters) >= 0.6);
+
+    if (needsAnnounce) {
+      lastSpokenObstaclesRef.current[key] = {
+        distanceMeters: primary.distanceMeters,
+        position: primary.position,
+        timestamp: now
+      };
+      const posText = primary.position === 'center' ? 'in front of you' : `on your ${primary.position}`;
+      const distText = primary.distanceMeters <= 1 ? 'very close' : `${primary.distanceMeters} meters away`;
+      const msg = `${primary.class} ${posText}, ${distText}.`;
+      speakIfNotMuted(msg);
+      addHistory('obstacle', msg, null, 'Alert');
+    }
+  }, [speakIfNotMuted, addHistory]);
+
+  // OCR Auto Trigger Helper
+  const processAutonomousOcrTrigger = useCallback((predictions: any[]) => {
+    const ocrTargetClasses = ['book', 'cell phone', 'stop sign', 'bottle', 'backpack', 'tie'];
+    const hasOcrTarget = predictions.some(pred => {
+      const isTarget = ocrTargetClasses.includes(pred.class.toLowerCase());
+      const score = pred.score !== undefined ? pred.score : 1.0;
+      return isTarget && score > 0.6;
+    });
+
+    const now = Date.now();
+    if (hasOcrTarget && now - lastOcrTimeRef.current > 20000) {
+      lastOcrTimeRef.current = now;
+      handleOCR();
+    }
+  }, [handleOCR]);
+
+  // Live fast local detection loop (20+ FPS)
+  useEffect(() => {
+    if (!cameraOn || !videoRef.current || !canvasRef.current) {
+      if (localDetectionLoopRef.current) {
+        cancelAnimationFrame(localDetectionLoopRef.current);
+        localDetectionLoopRef.current = null;
+      }
+      return;
+    }
+
+    let frameCount = 0;
+    let fpsInterval = setInterval(() => {
+      setFps(frameCount);
+      frameCount = 0;
+    }, 1000);
+
+    const runLocalDetection = async () => {
+      if (!videoRef.current || !canvasRef.current) return;
+      
+      if (videoRef.current.readyState === videoRef.current.HAVE_ENOUGH_DATA) {
+        try {
+          if (typeof window !== 'undefined' && (window as any).cocoSsd) {
+            const model = await getLocalModel();
+            const predictions = await model.detect(videoRef.current);
+            
+            drawBoundingBoxes(predictions, canvasRef.current, videoRef.current, settings.confidence_threshold);
+
+            if (predictions.length > 0) {
+              const mapped = predictions.map((pred: any) => {
+                const [x, , w, h] = pred.bbox;
+                const centerX = x + w / 2;
+                const videoWidth = videoRef.current?.videoWidth || 640;
+                const videoHeight = videoRef.current?.videoHeight || 480;
+
+                let position: 'left' | 'center' | 'right' = 'center';
+                if (centerX < videoWidth * 0.35) position = 'left';
+                else if (centerX > videoWidth * 0.65) position = 'right';
+
+                const relativeHeight = h / videoHeight;
+                const distanceMeters = Math.min(10, Math.max(0.3, Math.round((0.5 / relativeHeight) * 10) / 10));
+
+                let distance = 'Far';
+                if (distanceMeters <= 1.2) distance = 'Very close';
+                else if (distanceMeters <= 2.2) distance = 'Close';
+                else if (distanceMeters <= 4.2) distance = 'Medium';
+
+                let className = pred.class;
+                if (className === 'person' && registeredFaces.length > 0) {
+                  className = registeredFaces[0];
+                }
+
+                return {
+                  class: className,
+                  confidence: pred.score,
+                  position,
+                  distance,
+                  distanceMeters,
+                  bbox: pred.bbox
+                };
+              });
+
+              setVisionResult(prev => ({
+                objects: mapped,
+                scene: prev?.scene || '',
+                text: prev?.text || '',
+                colors: prev?.colors || [],
+                currency: prev?.currency || '',
+                warning: prev?.warning || ''
+              }));
+
+              processObstacleAlerts(mapped);
+              processAutonomousOcrTrigger(predictions);
+            } else {
+              setVisionResult(prev => ({
+                objects: [],
+                scene: prev?.scene || '',
+                text: prev?.text || '',
+                colors: prev?.colors || [],
+                currency: prev?.currency || '',
+                warning: ''
+              }));
+            }
+          }
+        } catch (e) {
+          console.error("Local fast detection loop error:", e);
+        }
+      }
+
+      frameCount++;
+      localDetectionLoopRef.current = requestAnimationFrame(runLocalDetection);
+    };
+
+    runLocalDetection();
+
+    return () => {
+      clearInterval(fpsInterval);
+      if (localDetectionLoopRef.current) {
+        cancelAnimationFrame(localDetectionLoopRef.current);
+        localDetectionLoopRef.current = null;
+      }
+    };
+  }, [cameraOn, settings.confidence_threshold, registeredFaces, processObstacleAlerts, processAutonomousOcrTrigger]);
+
   // Voice command parsing engine
   const processVoiceCommand = useCallback(async (transcript: string) => {
     const cmd = transcript.trim().toLowerCase();
@@ -830,7 +893,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
     if (cmd.includes('चेहरा') || cmd.includes('फेस') || cmd.includes('முகம்') || cmd.includes('ಮುಖ')) {
       normalizedCmd += ' face';
     }
-    if (cmd.includes('पढ़ें') || cmd.includes('पढ़ें') || cmd.includes('टेक्स्ट') || cmd.includes('வாసి') || cmd.includes('ಓದು') || cmd.includes('ಚಹರೆ')) {
+    if (cmd.includes('पढ़ें') || cmd.includes('पढ़ें') || cmd.includes('टेक्स्ट') || cmd.includes('வாசி') || cmd.includes('ಓದು') || cmd.includes('ಚहरे')) {
       normalizedCmd += ' read';
     }
     if (cmd.includes('वर्णन') || cmd.includes('दृश्य') || cmd.includes('ವಿಳಕ್ಕು') || cmd.includes('ವಿವರಿಸು') || cmd.includes('ದೃಶ್ಯ')) {
@@ -839,7 +902,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
     if (cmd.includes('रंग') || cmd.includes('நிறம்') || cmd.includes('రంగు') || cmd.includes('ಬಣ್ಣ')) {
       normalizedCmd += ' color';
     }
-    if (cmd.includes('पैसे') || cmd.includes('रुपये') || cmd.includes('பணம்') || cmd.includes('డబ్బు') || cmd.includes('హణ')) {
+    if (cmd.includes('पैसे') || cmd.includes('रुपये') || cmd.includes('பணம்') || cmd.includes('డబ్బు') || cmd.includes('ಹಣ')) {
       normalizedCmd += ' currency';
     }
     if (cmd.includes('रोकें') || cmd.includes('बंद') || cmd.includes('நிறுத்து') || cmd.includes('ఆపు') || cmd.includes('ನಿಲ್ಲಿಸು')) {
@@ -1003,7 +1066,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
   }, [
     currentCoords, settings, simulatedLoc, navActive, currentRoadName, batteryLevel,
     distanceRemaining, etaMinutes, routeCoords, routeSteps, navStep, cameraOn,
-    speakIfNotMuted, addHistory, startRouteNavigation, findNearestPlace, handleOCR, handleScene, handleColor, handleCurrency, handleFace, handleSos, startCamera
+    speakIfNotMuted, addHistory, startRouteNavigation, findNearestPlace, handleOCR, handleScene, handleColor, handleFace, handleSos, startCamera
   ]);
 
   // Continuous speech recognition controller with Wake Word
@@ -1085,6 +1148,64 @@ export default function Dashboard({ onExit }: DashboardProps) {
     };
   }, [settings.voice_automation, startContinuousListening]);
 
+  // Export CSV
+  const exportCsv = useCallback(() => {
+    const csv = ['Time,Type,Label,Confidence,Action'];
+    for (const h of history) {
+      csv.push(`${h.time},${h.type},${h.label},${h.confidence ?? ''},${h.action}`);
+    }
+    const blob = new Blob([csv.join('\n')], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'visionassist_history.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [history]);
+
+  const clearHistory = useCallback(async () => {
+    setHistory([]);
+    localStorage.removeItem('visionassist_history');
+    try {
+      await supabase.from('detection_history').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    } catch (e) {
+      console.warn('Failed to clear history from Supabase:', e);
+    }
+  }, []);
+
+  // Standard Voice manual trigger callback
+  const handleVoiceCommand = useCallback(() => {
+    if (!speechHelperRef.current?.isSupported()) {
+      speakIfNotMuted('Voice recognition not supported in this browser.');
+      return;
+    }
+    if (settings.voice_automation) {
+      // Toggle off automation if clicked
+      setSettings(s => {
+        const next = { ...s, voice_automation: false };
+        localStorage.setItem('visionassist_settings', JSON.stringify(next));
+        return next;
+      });
+      speakIfNotMuted('Automatic voice control disabled.');
+      return;
+    }
+    
+    // Single prompt start
+    setListening(true);
+    speakIfNotMuted('Listening for command.');
+    setTimeout(() => {
+      speechHelperRef.current?.start(
+        (transcript) => {
+          setListening(false);
+          processVoiceCommand(transcript);
+        },
+        () => {
+          setListening(false);
+        }
+      );
+    }, 1500);
+  }, [settings.voice_automation, speakIfNotMuted, processVoiceCommand]);
+
   // Keyboard shortcut listener effect
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1129,125 +1250,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [cameraOn, navActive, handleOCR, handleScene, handleColor, handleFace, handleSos, startCamera, stopCamera, simulateDeviation]);
-
-  // Standard Voice manual trigger callback
-  const handleVoiceCommand = useCallback(() => {
-    if (!speechHelperRef.current?.isSupported()) {
-      speakIfNotMuted('Voice recognition not supported in this browser.');
-      return;
-    }
-    if (settings.voice_automation) {
-      // Toggle off automation if clicked
-      setSettings(s => {
-        const next = { ...s, voice_automation: false };
-        localStorage.setItem('visionassist_settings', JSON.stringify(next));
-        return next;
-      });
-      speakIfNotMuted('Automatic voice control disabled.');
-      return;
-    }
-    
-    // Single prompt start
-    setListening(true);
-    speakIfNotMuted('Listening for command.');
-    setTimeout(() => {
-      speechHelperRef.current?.start(
-        (transcript) => {
-          setListening(false);
-          processVoiceCommand(transcript);
-        },
-        () => {
-          setListening(false);
-        }
-      );
-    }, 1500);
-  }, [settings.voice_automation, speakIfNotMuted, processVoiceCommand]);
-
-  // SOS
-  const handleSos = useCallback(async () => {
-    setShowSos(true);
-    setSosSent(false);
-
-    // Cancel current navigation
-    setNavActive(false);
-    setDestinationCoords(null);
-    setRouteCoords([]);
-    setRouteSteps([]);
-    setSimulatedLoc(null);
-    setIsSimulatingWalk(false);
-
-    navigator.geolocation?.getCurrentPosition(
-      async (pos) => {
-        const { latitude, longitude } = pos.coords;
-        const message = `EMERGENCY: VisionAssist user needs help. Location: ${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
-        try {
-          await supabase.from('activity_log').insert({ event: 'sos', details: { message, location: { latitude, longitude } } });
-        } catch (e) {
-          console.warn('Failed to log SOS activity to Supabase:', e);
-        }
-        setSosSent(true);
-        speakIfNotMuted('Emergency activated. Location shared. Calling emergency contact.');
-
-        // Automatically map route to nearest hospital
-        try {
-          const places = await searchPlaces('hospital', latitude, longitude);
-          if (places.length > 0) {
-            const nearestHosp = places[0];
-            setDestinationCoords([nearestHosp.latitude, nearestHosp.longitude]);
-            const route = await getWalkingRoute([latitude, longitude], [nearestHosp.latitude, nearestHosp.longitude]);
-            setRouteCoords(route.coordinates);
-            setRouteSteps(route.steps);
-            setNavDestination(nearestHosp.name.split(',')[0]);
-            setDistanceRemaining(route.distance);
-            setEtaMinutes(Math.ceil(route.duration / 60));
-            setNavActive(true);
-            setIsSimulatingWalk(true);
-            setNavStep(0);
-            setSimulatedLoc([latitude, longitude]);
-            setCurrentRoadName(route.steps[0]?.instruction || 'Routing to medical facility');
-            speakIfNotMuted(`Routing emergency navigation to closest hospital: ${nearestHosp.name.split(',')[0]}`);
-          }
-        } catch (err) {
-          console.warn('Emergency hospital routing failed:', err);
-        }
-      },
-      async () => {
-        try {
-          await supabase.from('activity_log').insert({ event: 'sos', details: { message: 'Location unavailable' } });
-        } catch (e) {
-          console.warn('Failed to log SOS activity to Supabase:', e);
-        }
-        setSosSent(true);
-        speakIfNotMuted('Emergency alert sent. Location unavailable.');
-      }
-    );
-  }, [speakIfNotMuted]);
-
-  // Export CSV
-  const exportCsv = useCallback(() => {
-    const csv = ['Time,Type,Label,Confidence,Action'];
-    for (const h of history) {
-      csv.push(`${h.time},${h.type},${h.label},${h.confidence ?? ''},${h.action}`);
-    }
-    const blob = new Blob([csv.join('\n')], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'visionassist_history.csv';
-    a.click();
-    URL.revokeObjectURL(url);
-  }, [history]);
-
-  const clearHistory = useCallback(async () => {
-    setHistory([]);
-    localStorage.removeItem('visionassist_history');
-    try {
-      await supabase.from('detection_history').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-    } catch (e) {
-      console.warn('Failed to clear history from Supabase:', e);
-    }
-  }, []);
+  }, [cameraOn, navActive, handleOCR, handleScene, handleColor, handleFace, handleSos, startCamera, stopCamera, simulateDeviation, handleVoiceCommand]);
 
   useEffect(() => {
     return () => {
@@ -2021,7 +2024,7 @@ function SettingsView({ onBack, settings, setSettings, contacts, setContacts, re
   useEffect(() => {
     (async () => {
       try {
-        const { data, error } = await supabase
+        const { data } = await supabase
           .from('app_config')
           .select('value')
           .eq('key', 'OPENROUTER_API_KEY')
