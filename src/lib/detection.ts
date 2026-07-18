@@ -3,7 +3,7 @@ import { translateText } from './speech';
 let cachedCocoModel: any = null;
 let modelLoadingPromise: Promise<any> | null = null;
 
-async function getLocalModel(): Promise<any> {
+export async function getLocalModel(): Promise<any> {
   if (cachedCocoModel) return cachedCocoModel;
   if (modelLoadingPromise) return modelLoadingPromise;
 
@@ -391,4 +391,73 @@ export function generateVoiceMessage(obj: DetectedObject): string {
   return `${obj.class} ${posText}, ${distText}.`;
 }
 
-export function drawBoundingBoxesPlaceholder() {}
+export function drawBoundingBoxes(
+  predictions: any[],
+  canvas: HTMLCanvasElement,
+  video: HTMLVideoElement,
+  confidenceThreshold: number = 0.5
+) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  // Sync canvas dimensions with video bounding box
+  const rect = video.getBoundingClientRect();
+  if (canvas.width !== rect.width || canvas.height !== rect.height) {
+    canvas.width = rect.width;
+    canvas.height = rect.height;
+  }
+
+  // Clear previous drawings
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const videoWidth = video.videoWidth || 640;
+  const videoHeight = video.videoHeight || 480;
+  const scaleX = rect.width / videoWidth;
+  const scaleY = rect.height / videoHeight;
+
+  predictions.forEach((pred) => {
+    const score = pred.score !== undefined ? pred.score : (pred.confidence !== undefined ? pred.confidence : 1.0);
+    if (score < confidenceThreshold) return;
+
+    if (!pred.bbox) return;
+
+    const [x, y, w, h] = pred.bbox;
+    const drawX = x * scaleX;
+    const drawY = y * scaleY;
+    const drawW = w * scaleX;
+    const drawH = h * scaleY;
+
+    // Draw main glowing bounding box
+    ctx.strokeStyle = '#3b82f6';
+    ctx.lineWidth = 3;
+    ctx.lineJoin = 'round';
+    ctx.strokeRect(drawX, drawY, drawW, drawH);
+
+    // Draw shadow border
+    ctx.strokeStyle = 'rgba(59, 130, 246, 0.3)';
+    ctx.lineWidth = 6;
+    ctx.strokeRect(drawX, drawY, drawW, drawH);
+
+    // Calculate distance and position heuristic text
+    const centerX = x + w / 2;
+    let position = 'center';
+    if (centerX < videoWidth * 0.35) position = 'left';
+    else if (centerX > videoWidth * 0.65) position = 'right';
+
+    const relativeHeight = h / videoHeight;
+    const distanceMeters = Math.min(10, Math.max(0.3, Math.round((0.5 / relativeHeight) * 10) / 10));
+
+    // Label styling
+    const label = `${pred.class} · ${distanceMeters}m · ${position}`;
+    ctx.font = 'bold 12px sans-serif';
+    const textWidth = ctx.measureText(label).width;
+
+    // Label background
+    ctx.fillStyle = '#3b82f6';
+    ctx.fillRect(drawX, drawY - 22, textWidth + 10, 22);
+
+    // Label text
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(label, drawX + 5, drawY - 6);
+  });
+}

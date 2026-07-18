@@ -5,9 +5,9 @@ import {
   Scan, Eye, Palette, DollarSign, MapPin, AlertTriangle,
   Navigation, Settings, BarChart3, Home, X, Download, Trash2,
   Play, Square, Clock, TrendingUp, Zap, Brain, Target,
-  CheckCircle2, AlertCircle, Loader2, ScanFace, RefreshCw,
+  CheckCircle2, AlertCircle, Loader2, ScanFace, RefreshCw, Shield,
 } from 'lucide-react';
-import { analyzeFrame, generateVoiceMessage, type VisionResult } from '../lib/detection';
+import { analyzeFrame, generateVoiceMessage, drawBoundingBoxes, getLocalModel, type VisionResult } from '../lib/detection';
 import { speak, stopSpeaking, configureSpeech, SpeechRecognitionHelper, isSpeaking } from '../lib/speech';
 import { supabase, type AppSettings, type EmergencyContact, type DetectionRecord, type ActivityLogEntry, type DetectionType } from '../lib/supabase';
 import MapPanel from './MapPanel';
@@ -30,6 +30,7 @@ interface HistoryEntry {
 
 export default function Dashboard({ onExit }: DashboardProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const analysisTimerRef = useRef<number>(0);
   const lastSpeakRef = useRef<number>(0);
@@ -46,13 +47,19 @@ export default function Dashboard({ onExit }: DashboardProps) {
   const [fps, setFps] = useState(0);
   const [muted, setMuted] = useState(false);
   const [listening, setListening] = useState(false);
+  const [speakingState, setSpeakingState] = useState(false);
   const [ocrText, setOcrText] = useState('');
   const [sceneText, setSceneText] = useState('');
   const [colorResult, setColorResult] = useState<{ name: string; hex: string } | null>(null);
   const [currencyResult, setCurrencyResult] = useState('');
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [voiceMessage, setVoiceMessage] = useState('');
-  const [settings, setSettings] = useState<AppSettings & { voice_automation?: boolean }>({
+  const [settings, setSettings] = useState<AppSettings & { 
+    voice_automation?: boolean;
+    home_address?: string;
+    college_address?: string;
+    favorite_place?: string;
+  }>({
     voice_speed: 1.0,
     voice_lang: 'en-US',
     confidence_threshold: 0.5,
@@ -60,9 +67,13 @@ export default function Dashboard({ onExit }: DashboardProps) {
     camera_quality: 'medium',
     navigation_mode: 'walking',
     map_type: 'standard',
-    voice_automation: false
+    voice_automation: false,
+    home_address: '',
+    college_address: '',
+    favorite_place: ''
   });
   const [contacts, setContacts] = useState<EmergencyContact[]>([]);
+  const [registeredFaces, setRegisteredFaces] = useState<string[]>([]);
   const [showSos, setShowSos] = useState(false);
   const [sosSent, setSosSent] = useState(false);
   const [navDestination, setNavDestination] = useState('');
@@ -70,6 +81,8 @@ export default function Dashboard({ onExit }: DashboardProps) {
   const [navStep, setNavStep] = useState(0);
   const [activeFeature, setActiveFeature] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const [batteryLevel, setBatteryLevel] = useState(85);
+  const [speedMps, setSpeedMps] = useState(0);
 
   // Geolocation and navigation states
   const [currentCoords, setCurrentCoords] = useState<[number, number] | null>([12.9716, 80.2454]);
@@ -82,6 +95,14 @@ export default function Dashboard({ onExit }: DashboardProps) {
   const [currentRoadName, setCurrentRoadName] = useState<string>('');
   const [gpsStatus, setGpsStatus] = useState<'off' | 'searching' | 'active'>('off');
   const [isSimulatingWalk, setIsSimulatingWalk] = useState(false);
+
+  const awaitingCommandRef = useRef(false);
+  const commandTimeoutRef = useRef<number | null>(null);
+  const lastFoundNearestCoords = useRef<[number, number] | null>(null);
+  const lastFoundNearestName = useRef<string>('');
+  const lastSpokenObstaclesRef = useRef<Record<string, { distanceMeters: number; position: string; timestamp: number }>>({});
+  const lastOcrTimeRef = useRef<number>(0);
+  const localDetectionLoopRef = useRef<number | null>(null);
 
   // Load Geolocation on mount
   useEffect(() => {
@@ -106,7 +127,12 @@ export default function Dashboard({ onExit }: DashboardProps) {
   // Load settings
   useEffect(() => {
     (async () => {
-      let loadedSettings: AppSettings & { voice_automation?: boolean } = {
+      let loadedSettings: AppSettings & { 
+        voice_automation?: boolean;
+        home_address?: string;
+        college_address?: string;
+        favorite_place?: string;
+      } = {
         voice_speed: 1.0,
         voice_lang: 'en-US',
         confidence_threshold: 0.5,
@@ -114,7 +140,10 @@ export default function Dashboard({ onExit }: DashboardProps) {
         camera_quality: 'medium',
         navigation_mode: 'walking',
         map_type: 'standard',
-        voice_automation: false
+        voice_automation: false,
+        home_address: '',
+        college_address: '',
+        favorite_place: ''
       };
       try {
         const { data, error: fetchErr } = await supabase.from('app_settings').select('*').limit(1).maybeSingle();
@@ -138,6 +167,9 @@ export default function Dashboard({ onExit }: DashboardProps) {
         try {
           const parsed = JSON.parse(localData);
           loadedSettings.voice_automation = parsed.voice_automation || false;
+          loadedSettings.home_address = parsed.home_address || '';
+          loadedSettings.college_address = parsed.college_address || '';
+          loadedSettings.favorite_place = parsed.favorite_place || '';
         } catch {
           console.debug('Failed to parse settings');
         }
@@ -146,6 +178,20 @@ export default function Dashboard({ onExit }: DashboardProps) {
       }
       setSettings(loadedSettings);
       configureSpeech(loadedSettings.voice_speed || 1.0, loadedSettings.voice_lang || 'en-US');
+
+      // Load registered faces
+      const savedFaces = localStorage.getItem('visionassist_registered_faces');
+      if (savedFaces) {
+        try {
+          setRegisteredFaces(JSON.parse(savedFaces));
+        } catch {
+          setRegisteredFaces(['Mother', 'Raj']);
+        }
+      } else {
+        const defaultFaces = ['Mother', 'Raj'];
+        localStorage.setItem('visionassist_registered_faces', JSON.stringify(defaultFaces));
+        setRegisteredFaces(defaultFaces);
+      }
 
       let loadedContacts: EmergencyContact[] = [];
       try {
@@ -226,7 +272,9 @@ export default function Dashboard({ onExit }: DashboardProps) {
         speechHelperRef.current.stop();
         setListening(false);
       }
+      setSpeakingState(true);
       speak(text, () => {
+        setSpeakingState(false);
         if (settings.voice_automation) {
           setTimeout(() => {
             if (settings.voice_automation && !isSpeaking()) {
@@ -237,6 +285,180 @@ export default function Dashboard({ onExit }: DashboardProps) {
       });
     }
   }, [muted, settings.voice_automation]);
+
+  // Battery monitoring simulator
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setBatteryLevel(b => {
+        const next = Math.max(0, b - 1);
+        if (next === 15) {
+          speakIfNotMuted("Warning: Smart Glasses battery is low. 15% remaining.");
+        }
+        return next;
+      });
+    }, 120000); // 1% every 2 minutes
+    return () => clearInterval(interval);
+  }, [speakIfNotMuted]);
+
+  // Obstacle alerts tracking helper
+  const processObstacleAlerts = useCallback((objects: any[]) => {
+    const priorityClasses = ['vehicle', 'car', 'bus', 'truck', 'motorcycle', 'bicycle', 'person', 'pole', 'stairs', 'staircase', 'chair', 'backpack', 'bottle'];
+    const dangerousObjects = objects.filter(o => o.distanceMeters <= 3.5);
+    if (dangerousObjects.length === 0) return;
+
+    // Sort by priority class index then by closest distance
+    dangerousObjects.sort((a, b) => {
+      const idxA = priorityClasses.indexOf(a.class.toLowerCase());
+      const idxB = priorityClasses.indexOf(b.class.toLowerCase());
+      const priorityA = idxA !== -1 ? idxA : 999;
+      const priorityB = idxB !== -1 ? idxB : 999;
+      if (priorityA !== priorityB) return priorityA - priorityB;
+      return a.distanceMeters - b.distanceMeters;
+    });
+
+    const now = Date.now();
+    const primary = dangerousObjects[0];
+    const key = primary.class.toLowerCase();
+    const lastSpoken = lastSpokenObstaclesRef.current[key];
+
+    const needsAnnounce = 
+      !lastSpoken || 
+      (now - lastSpoken.timestamp > 15000) || 
+      (lastSpoken.position !== primary.position) || 
+      (Math.abs(lastSpoken.distanceMeters - primary.distanceMeters) >= 0.6);
+
+    if (needsAnnounce) {
+      lastSpokenObstaclesRef.current[key] = {
+        distanceMeters: primary.distanceMeters,
+        position: primary.position,
+        timestamp: now
+      };
+      const posText = primary.position === 'center' ? 'in front of you' : `on your ${primary.position}`;
+      const distText = primary.distanceMeters <= 1 ? 'very close' : `${primary.distanceMeters} meters away`;
+      const msg = `${primary.class} ${posText}, ${distText}.`;
+      speakIfNotMuted(msg);
+      addHistory('obstacle', msg, null, 'Alert');
+    }
+  }, [speakIfNotMuted, addHistory]);
+
+  // OCR Auto Trigger Helper
+  const processAutonomousOcrTrigger = useCallback((predictions: any[]) => {
+    const ocrTargetClasses = ['book', 'cell phone', 'stop sign', 'bottle', 'backpack', 'tie'];
+    const hasOcrTarget = predictions.some(pred => {
+      const isTarget = ocrTargetClasses.includes(pred.class.toLowerCase());
+      const score = pred.score !== undefined ? pred.score : 1.0;
+      return isTarget && score > 0.6;
+    });
+
+    const now = Date.now();
+    if (hasOcrTarget && now - lastOcrTimeRef.current > 20000) {
+      lastOcrTimeRef.current = now;
+      handleOCR();
+    }
+  }, [handleOCR]);
+
+  // Live fast local detection loop (20+ FPS)
+  useEffect(() => {
+    if (!cameraOn || !videoRef.current || !canvasRef.current) {
+      if (localDetectionLoopRef.current) {
+        cancelAnimationFrame(localDetectionLoopRef.current);
+        localDetectionLoopRef.current = null;
+      }
+      return;
+    }
+
+    let frameCount = 0;
+    let fpsInterval = setInterval(() => {
+      setFps(frameCount);
+      frameCount = 0;
+    }, 1000);
+
+    const runLocalDetection = async () => {
+      if (!videoRef.current || !canvasRef.current) return;
+      
+      if (videoRef.current.readyState === videoRef.current.HAVE_ENOUGH_DATA) {
+        try {
+          if (typeof window !== 'undefined' && (window as any).cocoSsd) {
+            const model = await getLocalModel();
+            const predictions = await model.detect(videoRef.current);
+            
+            drawBoundingBoxes(predictions, canvasRef.current, videoRef.current, settings.confidence_threshold);
+
+            if (predictions.length > 0) {
+              const mapped = predictions.map((pred: any) => {
+                const [x, , w, h] = pred.bbox;
+                const centerX = x + w / 2;
+                const videoWidth = videoRef.current?.videoWidth || 640;
+                const videoHeight = videoRef.current?.videoHeight || 480;
+
+                let position: 'left' | 'center' | 'right' = 'center';
+                if (centerX < videoWidth * 0.35) position = 'left';
+                else if (centerX > videoWidth * 0.65) position = 'right';
+
+                const relativeHeight = h / videoHeight;
+                const distanceMeters = Math.min(10, Math.max(0.3, Math.round((0.5 / relativeHeight) * 10) / 10));
+
+                let distance = 'Far';
+                if (distanceMeters <= 1.2) distance = 'Very close';
+                else if (distanceMeters <= 2.2) distance = 'Close';
+                else if (distanceMeters <= 4.2) distance = 'Medium';
+
+                let className = pred.class;
+                if (className === 'person' && registeredFaces.length > 0) {
+                  className = registeredFaces[0];
+                }
+
+                return {
+                  class: className,
+                  confidence: pred.score,
+                  position,
+                  distance,
+                  distanceMeters,
+                  bbox: pred.bbox
+                };
+              });
+
+              setVisionResult(prev => ({
+                objects: mapped,
+                scene: prev?.scene || '',
+                text: prev?.text || '',
+                colors: prev?.colors || [],
+                currency: prev?.currency || '',
+                warning: prev?.warning || ''
+              }));
+
+              processObstacleAlerts(mapped);
+              processAutonomousOcrTrigger(predictions);
+            } else {
+              setVisionResult(prev => ({
+                objects: [],
+                scene: prev?.scene || '',
+                text: prev?.text || '',
+                colors: prev?.colors || [],
+                currency: prev?.currency || '',
+                warning: ''
+              }));
+            }
+          }
+        } catch (e) {
+          console.error("Local fast detection loop error:", e);
+        }
+      }
+
+      frameCount++;
+      localDetectionLoopRef.current = requestAnimationFrame(runLocalDetection);
+    };
+
+    runLocalDetection();
+
+    return () => {
+      clearInterval(fpsInterval);
+      if (localDetectionLoopRef.current) {
+        cancelAnimationFrame(localDetectionLoopRef.current);
+        localDetectionLoopRef.current = null;
+      }
+    };
+  }, [cameraOn, settings.confidence_threshold, registeredFaces, processObstacleAlerts, processAutonomousOcrTrigger]);
 
   // Camera start
   const startCamera = useCallback(async (mode?: 'user' | 'environment') => {
@@ -259,55 +481,37 @@ export default function Dashboard({ onExit }: DashboardProps) {
       }
       setCameraOn(true);
       setCameraStatus('on');
-      speakIfNotMuted('Camera started. Analyzing your surroundings.');
+      speakIfNotMuted('Camera started. Analyzing surroundings.');
 
-      // Start periodic analysis
-      const analyze = async () => {
+      // Start periodic high-level cloud analysis (runs every 8 seconds for scene details)
+      const analyzeCloud = async () => {
         if (!streamRef.current || !videoRef.current || isAnalyzingRef.current) return;
         isAnalyzingRef.current = true;
         setAnalyzing(true);
         try {
-          const result = await analyzeFrame(videoRef.current, undefined, settings.voice_lang);
-          setVisionResult(result);
-          setFps(Math.round(1000 / (1000 / (result.objects.length > 0 ? 2 : 3))));
-
-          // Voice for closest object (Only trigger if not currently navigating to prevent audio collision)
-          const now = Date.now();
-          if (result.objects.length > 0 && now - lastSpeakRef.current > 5000 && !muted && !navActive) {
-            const closest = result.objects.reduce((min, o) => o.distanceMeters < min.distanceMeters ? o : min);
-            lastSpeakRef.current = now;
-            const msg = generateVoiceMessage(closest);
-            speakIfNotMuted(msg);
-            addHistory('object', closest.class, closest.confidence, closest.distance);
-          }
-
-          // Obstacle warning
-          if (result.warning && now - lastSpeakRef.current > 5000) {
-            lastSpeakRef.current = now;
-            speakIfNotMuted(result.warning);
-            addHistory('obstacle', result.warning, null, 'Warning');
+          const result = await analyzeFrame(videoRef.current, 'Describe this scene in one clear sentence for a visually impaired person.', settings.voice_lang);
+          
+          if (result.scene) {
+            speakIfNotMuted(result.scene);
+            addHistory('scene', result.scene.slice(0, 50), null, 'Cloud update');
           }
         } catch (err) {
-          console.error('Analysis error:', err);
-          const errMsg = err instanceof Error ? err.message : String(err);
-          setError(errMsg || 'Analysis failed');
+          console.warn('Cloud periodic analysis failed:', err);
         } finally {
           isAnalyzingRef.current = false;
           setAnalyzing(false);
         }
       };
 
-      // Run first analysis immediately
-      analyze();
-      // Then every 4 seconds
+      analyzeCloud();
       if (analysisTimerRef.current) clearInterval(analysisTimerRef.current);
-      analysisTimerRef.current = window.setInterval(analyze, 4000);
+      analysisTimerRef.current = window.setInterval(analyzeCloud, 8000);
     } catch (err) {
       console.error('Camera error:', err);
       setCameraStatus('error');
       setError('Camera access denied. Please allow camera permissions.');
     }
-  }, [settings.camera_quality, facingMode, muted, navActive, speakIfNotMuted, addHistory]);
+  }, [settings.camera_quality, settings.voice_lang, facingMode, speakIfNotMuted, addHistory]);
 
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
@@ -321,6 +525,12 @@ export default function Dashboard({ onExit }: DashboardProps) {
     setFps(0);
     setAnalyzing(false);
     isAnalyzingRef.current = false;
+
+    // Clear canvas
+    if (canvasRef.current) {
+      const ctx = canvasRef.current.getContext('2d');
+      ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    }
   }, []);
 
   const toggleCamera = useCallback(async () => {
@@ -393,11 +603,11 @@ export default function Dashboard({ onExit }: DashboardProps) {
       const dist = Math.round(getDistanceMeters(baseLat, baseLon, nearest.latitude, nearest.longitude));
       const walkTime = Math.ceil(dist / 1.4 / 60);
       
+      lastFoundNearestCoords.current = [nearest.latitude, nearest.longitude];
+      lastFoundNearestName.current = nearest.name.split(',')[0];
+      
       speakIfNotMuted(`${nearest.name.split(',')[0]} is ${dist} meters away. Walking time is ${walkTime} minutes. Would you like to navigate there?`);
       addHistory('places', nearest.name.split(',')[0], null, `${dist}m`);
-      
-      setNavDestination(nearest.name.split(',')[0]);
-      setDestinationCoords([nearest.latitude, nearest.longitude]);
     } catch (err) {
       console.error('Failed to search places:', err);
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -406,14 +616,33 @@ export default function Dashboard({ onExit }: DashboardProps) {
     }
   }, [currentCoords, speakIfNotMuted, addHistory]);
 
-  // Simulated GPS walk loop & Obstacles
+  // Simulated deviation helper
+  const simulateDeviation = useCallback(() => {
+    if (!simulatedLoc) return;
+    const offsetLoc: [number, number] = [
+      simulatedLoc[0] + 0.00045, // displaces user off path (~40-50m)
+      simulatedLoc[1] - 0.00045
+    ];
+    setSimulatedLoc(offsetLoc);
+    speakIfNotMuted("Simulated route deviation.");
+  }, [simulatedLoc, speakIfNotMuted]);
+
+  // Simulated GPS walk loop & turn-by-turn guidance
   useEffect(() => {
-    if (!navActive || routeCoords.length === 0 || !isSimulatingWalk) return;
+    if (!navActive || routeCoords.length === 0 || !isSimulatingWalk) {
+      setSpeedMps(0);
+      return;
+    }
 
     let coordIndex = 0;
-    const intervalTime = 3000; // Move every 3 seconds
+    const intervalTime = 3500; // Move every 3.5 seconds
 
     const timer = setInterval(() => {
+      if (!navActive || !isSimulatingWalk) {
+        clearInterval(timer);
+        return;
+      }
+      
       coordIndex += 1;
       
       if (coordIndex >= routeCoords.length) {
@@ -424,6 +653,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
         setRouteSteps([]);
         setSimulatedLoc(null);
         setIsSimulatingWalk(false);
+        setSpeedMps(0);
         speakIfNotMuted('You have reached your destination.');
         addHistory('navigation', navDestination, null, 'Arrived');
         return;
@@ -431,6 +661,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
 
       const nextLoc = routeCoords[coordIndex];
       setSimulatedLoc(nextLoc);
+      setSpeedMps(1.4);
 
       // Distance and ETA updates
       if (destinationCoords) {
@@ -442,13 +673,13 @@ export default function Dashboard({ onExit }: DashboardProps) {
         setEtaMinutes(Math.ceil(remaining / 1.4 / 60));
       }
 
-      // Check coordinates of turn steps
+      // Turn instructions matching
       const currentStepObj = routeSteps.find((step, idx) => {
         const dist = getDistanceMeters(
           nextLoc[0], nextLoc[1],
           step.coordinate[0], step.coordinate[1]
         );
-        return dist < 20 && idx >= navStep;
+        return dist < 15 && idx >= navStep;
       });
 
       if (currentStepObj) {
@@ -458,24 +689,26 @@ export default function Dashboard({ onExit }: DashboardProps) {
         speakIfNotMuted(currentStepObj.instruction);
       }
 
-      // Smart Glasses obstacle warnings integration during walk
-      if (cameraOn && Math.random() < 0.25) {
-        const obstacles = [
-          "Obstacle ahead. Move right.",
-          "Vehicle approaching. Please stop.",
-          "Person in front of you. Stay alert.",
-          "Zebra crossing ahead. Cross carefully.",
-          "Stairs detected. Watch your step.",
-        ];
-        const warning = obstacles[Math.floor(Math.random() * obstacles.length)];
-        speakIfNotMuted(warning);
-        setVisionResult(prev => prev ? { ...prev, warning } : { objects: [], scene: '', text: '', colors: [], currency: '', warning });
-        addHistory('obstacle', warning, null, 'Warning');
+      // Check if user has deviated off-route
+      let minDistanceToPath = Infinity;
+      routeCoords.forEach((coord) => {
+        const d = getDistanceMeters(nextLoc[0], nextLoc[1], coord[0], coord[1]);
+        if (d < minDistanceToPath) minDistanceToPath = d;
+      });
+
+      if (minDistanceToPath > 35) {
+        clearInterval(timer);
+        setIsSimulatingWalk(false);
+        setSpeedMps(0);
+        speakIfNotMuted("You are off route. Calculating a better path.");
+        setTimeout(() => {
+          startRouteNavigation(navDestination);
+        }, 2000);
       }
     }, intervalTime);
 
     return () => clearInterval(timer);
-  }, [navActive, routeCoords, routeSteps, navStep, destinationCoords, cameraOn, navDestination, isSimulatingWalk, speakIfNotMuted, addHistory]);
+  }, [navActive, routeCoords, routeSteps, navStep, destinationCoords, navDestination, isSimulatingWalk, speakIfNotMuted, addHistory, startRouteNavigation]);
 
   // OCR
   const handleOCR = useCallback(async () => {
@@ -590,7 +823,190 @@ export default function Dashboard({ onExit }: DashboardProps) {
     setAnalyzing(false);
   }, [speakIfNotMuted, addHistory]);
 
-  // Continuous Voice command controller
+  // Voice command parsing engine
+  const processVoiceCommand = useCallback(async (transcript: string) => {
+    const cmd = transcript.trim().toLowerCase();
+    let normalizedCmd = cmd;
+    if (cmd.includes('चेहरा') || cmd.includes('फेस') || cmd.includes('முகம்') || cmd.includes('ಮುಖ')) {
+      normalizedCmd += ' face';
+    }
+    if (cmd.includes('पढ़ें') || cmd.includes('पढ़ें') || cmd.includes('टेक्स्ट') || cmd.includes('வாసి') || cmd.includes('ಓದು') || cmd.includes('ಚಹರೆ')) {
+      normalizedCmd += ' read';
+    }
+    if (cmd.includes('वर्णन') || cmd.includes('दृश्य') || cmd.includes('ವಿಳಕ್ಕು') || cmd.includes('ವಿವರಿಸು') || cmd.includes('ದೃಶ್ಯ')) {
+      normalizedCmd += ' describe';
+    }
+    if (cmd.includes('रंग') || cmd.includes('நிறம்') || cmd.includes('రంగు') || cmd.includes('ಬಣ್ಣ')) {
+      normalizedCmd += ' color';
+    }
+    if (cmd.includes('पैसे') || cmd.includes('रुपये') || cmd.includes('பணம்') || cmd.includes('డబ్బు') || cmd.includes('హణ')) {
+      normalizedCmd += ' currency';
+    }
+    if (cmd.includes('रोकें') || cmd.includes('बंद') || cmd.includes('நிறுத்து') || cmd.includes('ఆపు') || cmd.includes('ನಿಲ್ಲಿಸು')) {
+      normalizedCmd += ' stop';
+    }
+    if (cmd.includes('नेविगेट') || cmd.includes('रास्ता') || cmd.includes('வழி') || cmd.includes('ಮಾರ್ಗ')) {
+      normalizedCmd += ' navigate';
+    }
+
+    console.log(`Command processed: "${transcript}" -> "${normalizedCmd}"`);
+
+    // Yes/No response for navigation check
+    if (lastFoundNearestName.current && (normalizedCmd === 'yes' || normalizedCmd === 'sure' || normalizedCmd.includes('yes please') || normalizedCmd.includes('navigate'))) {
+      if (lastFoundNearestCoords.current) {
+        const destCoords = lastFoundNearestCoords.current;
+        const destName = lastFoundNearestName.current;
+        lastFoundNearestName.current = '';
+        lastFoundNearestCoords.current = null;
+        speakIfNotMuted(`Starting navigation to ${destName}.`);
+        try {
+          const baseLat = currentCoords ? currentCoords[0] : 12.9716;
+          const baseLon = currentCoords ? currentCoords[1] : 80.2454;
+          setDestinationCoords(destCoords);
+          const route = await getWalkingRoute([baseLat, baseLon], destCoords);
+          setRouteCoords(route.coordinates);
+          setRouteSteps(route.steps);
+          setNavDestination(destName.split(',')[0]);
+          setDistanceRemaining(route.distance);
+          setEtaMinutes(Math.ceil(route.duration / 60));
+          setNavActive(true);
+          setIsSimulatingWalk(true);
+          setNavStep(0);
+          setSimulatedLoc([baseLat, baseLon]);
+          setCurrentRoadName(route.steps[0]?.instruction || 'Start walking');
+        } catch (e) {
+          console.warn('Navigation failed from choice:', e);
+        }
+      }
+      return;
+    }
+
+    // AI Memory Location parsing
+    if (normalizedCmd.includes('take me home') || normalizedCmd.includes('go home') || normalizedCmd === 'navigate home') {
+      const address = settings.home_address;
+      if (address) {
+        startRouteNavigation(address);
+      } else {
+        speakIfNotMuted("Home address is not configured. Please add it in settings.");
+      }
+      return;
+    }
+
+    if (normalizedCmd.includes('take me to college') || normalizedCmd.includes('go to college') || normalizedCmd === 'navigate to college') {
+      const address = settings.college_address;
+      if (address) {
+        startRouteNavigation(address);
+      } else {
+        speakIfNotMuted("College address is not configured. Please add it in settings.");
+      }
+      return;
+    }
+
+    if (normalizedCmd.includes('take me to favorite') || normalizedCmd.includes('go to favorite') || normalizedCmd === 'navigate to favorite') {
+      const address = settings.favorite_place;
+      if (address) {
+        startRouteNavigation(address);
+      } else {
+        speakIfNotMuted("Favorite destination is not configured. Please add it in settings.");
+      }
+      return;
+    }
+
+    // Navigation and route management
+    if (normalizedCmd.includes('take me to') || normalizedCmd.includes('navigate to') || normalizedCmd.includes('go to')) {
+      const match = normalizedCmd.match(/(?:take me to|navigate to|go to)\s+(.+)/);
+      if (match && match[1]) {
+        startRouteNavigation(match[1].trim());
+      }
+    } else if (normalizedCmd.includes('find nearest') || normalizedCmd.includes('nearest')) {
+      const match = normalizedCmd.match(/(?:find nearest|nearest)\s+(.+)/);
+      if (match && match[1]) {
+        const placeQuery = match[1].trim();
+        let placeType = placeQuery;
+        if (placeQuery.includes('hospital') || placeQuery.includes('medical')) placeType = 'hospital';
+        else if (placeQuery.includes('atm') || placeQuery.includes('cash')) placeType = 'atm';
+        else if (placeQuery.includes('pharmacy') || placeQuery.includes('chemist')) placeType = 'pharmacy';
+        else if (placeQuery.includes('bus stop') || placeQuery.includes('bus')) placeType = 'bus stop';
+        else if (placeQuery.includes('restaurant') || placeQuery.includes('food')) placeType = 'restaurant';
+        findNearestPlace(placeType);
+      }
+    } else if (normalizedCmd.includes('cancel navigation') || normalizedCmd.includes('stop navigation')) {
+      setNavActive(false);
+      setDestinationCoords(null);
+      setRouteCoords([]);
+      setRouteSteps([]);
+      setSimulatedLoc(null);
+      setIsSimulatingWalk(false);
+      speakIfNotMuted('Navigation stopped.');
+      addHistory('navigation', 'Stopped', null, 'Cancelled');
+    } else if (normalizedCmd.includes('pause navigation')) {
+      setNavActive(false);
+      speakIfNotMuted('Navigation paused.');
+    } else if (normalizedCmd.includes('resume navigation') || normalizedCmd.includes('continue navigation') || normalizedCmd === 'resume') {
+      if (routeCoords.length > 0) {
+        setNavActive(true);
+        speakIfNotMuted('Resuming navigation.');
+      } else {
+        speakIfNotMuted('No active route to resume.');
+      }
+    } else if (normalizedCmd.includes('how far') || normalizedCmd.includes('remaining distance')) {
+      if (routeCoords.length > 0) {
+        speakIfNotMuted(`Destination is ${distanceRemaining} meters away, about ${etaMinutes} minutes walking.`);
+      } else {
+        speakIfNotMuted('No active navigation route.');
+      }
+    } else if (normalizedCmd.includes('next turn') || normalizedCmd.includes('direction')) {
+      if (routeCoords.length > 0 && routeSteps[navStep]) {
+        speakIfNotMuted(`Your next turn is: ${routeSteps[navStep].instruction}`);
+      } else {
+        speakIfNotMuted('No active navigation route.');
+      }
+    } else if (normalizedCmd.includes('repeat instruction') || normalizedCmd.includes('repeat')) {
+      if (routeCoords.length > 0 && routeSteps[Math.max(0, navStep - 1)]) {
+        speakIfNotMuted(routeSteps[Math.max(0, navStep - 1)].instruction);
+      } else {
+        speakIfNotMuted('No instructions to repeat.');
+      }
+    }
+    // Context Info
+    else if (normalizedCmd.includes('where am i') || normalizedCmd === 'location' || normalizedCmd.includes('coordinates')) {
+      const activeLoc = simulatedLoc || currentCoords || [12.9716, 80.2454];
+      if (navActive && currentRoadName) {
+        speakIfNotMuted(`You are currently on the route. ${currentRoadName}. Location coordinates are latitude ${activeLoc[0].toFixed(4)}, longitude ${activeLoc[1].toFixed(4)}.`);
+      } else {
+        speakIfNotMuted(`Your current coordinates are latitude ${activeLoc[0].toFixed(4)}, longitude ${activeLoc[1].toFixed(4)}.`);
+      }
+    } else if (normalizedCmd.includes('battery') || normalizedCmd.includes('power')) {
+      speakIfNotMuted(`Smart Glasses battery is at ${batteryLevel} percent, operating normally.`);
+    } else if (normalizedCmd.includes('what') && normalizedCmd.includes('front')) {
+      handleScene();
+    } else if (normalizedCmd.includes('read') || normalizedCmd.includes('ocr') || normalizedCmd.includes('text')) {
+      handleOCR();
+    } else if (normalizedCmd.includes('describe') || normalizedCmd.includes('scene') || normalizedCmd.includes('surroundings')) {
+      handleScene();
+    } else if (normalizedCmd.includes('color')) {
+      handleColor();
+    } else if (normalizedCmd.includes('currency') || normalizedCmd.includes('money')) {
+      handleCurrency();
+    } else if (normalizedCmd.includes('face') || normalizedCmd.includes('person') || normalizedCmd.includes('who')) {
+      handleFace();
+    } else if (normalizedCmd.includes('stop')) {
+      stopSpeaking();
+      setVoiceMessage('');
+    } else if (normalizedCmd.includes('start') && normalizedCmd.includes('camera')) {
+      if (!cameraOn) startCamera();
+    } else if (normalizedCmd.includes('help') || normalizedCmd.includes('emergency') || normalizedCmd.includes('sos')) {
+      handleSos();
+    } else {
+      speakIfNotMuted(`Command: ${transcript}. Not recognized.`);
+    }
+  }, [
+    currentCoords, settings, simulatedLoc, navActive, currentRoadName, batteryLevel,
+    distanceRemaining, etaMinutes, routeCoords, routeSteps, navStep, cameraOn,
+    speakIfNotMuted, addHistory, startRouteNavigation, findNearestPlace, handleOCR, handleScene, handleColor, handleCurrency, handleFace, handleSos, startCamera
+  ]);
+
+  // Continuous speech recognition controller with Wake Word
   const startContinuousListening = useCallback(() => {
     if (!speechHelperRef.current || !speechHelperRef.current.isSupported() || isSpeaking()) {
       return;
@@ -599,116 +1015,49 @@ export default function Dashboard({ onExit }: DashboardProps) {
     speechHelperRef.current.start(
       (transcript) => {
         setListening(false);
-        const cmd = transcript.toLowerCase();
-        
-        // Map regional translations to triggers
-        let normalizedCmd = cmd;
-        if (cmd.includes('चेहरा') || cmd.includes('फेस') || cmd.includes('முகம்') || cmd.includes('ಮುಖ')) {
-          normalizedCmd += ' face';
-        }
-        if (cmd.includes('पढ़ें') || cmd.includes('पढ़ें') || cmd.includes('टेक्स्ट') || cmd.includes('வாசி') || cmd.includes('ಓದು') || cmd.includes('ಚಹರೆ')) {
-          normalizedCmd += ' read';
-        }
-        if (cmd.includes('वर्णನ') || cmd.includes('दृश्य') || cmd.includes('ವಿಳಕ್ಕು') || cmd.includes('ವಿವರಿಸು') || cmd.includes('ದೃಶ್ಯ')) {
-          normalizedCmd += ' describe';
-        }
-        if (cmd.includes('रंग') || cmd.includes('நிறம்') || cmd.includes('రంగు') || cmd.includes('ಬಣ್ಣ')) {
-          normalizedCmd += ' color';
-        }
-        if (cmd.includes('पैसे') || cmd.includes('रुपये') || cmd.includes('பணம்') || cmd.includes('డబ్బు') || cmd.includes('ಹಣ')) {
-          normalizedCmd += ' currency';
-        }
-        if (cmd.includes('रोकें') || cmd.includes('बंद') || cmd.includes('நிறுத்து') || cmd.includes('ఆపు') || cmd.includes('ನಿಲ್ಲಿಸು')) {
-          normalizedCmd += ' stop';
-        }
-        if (cmd.includes('नेविगेट') || cmd.includes('रास्ता') || cmd.includes('வழி') || cmd.includes('ಮಾರ್ಗ')) {
-          normalizedCmd += ' navigate';
-        }
+        const cmd = transcript.trim().toLowerCase();
+        console.log(`Continuous transcript heard: "${transcript}"`);
 
-        console.log(`Continuous Voice Command: "${transcript}" -> "${normalizedCmd}"`);
+        const wakeWords = ["hey vision", "vision", "assistant"];
+        const matchedWakeWord = wakeWords.find(w => cmd.includes(w));
 
-        // Voice Navigation Commands parsing
-        if (normalizedCmd.includes('take me to') || normalizedCmd.includes('navigate to') || normalizedCmd.includes('go to')) {
-          const match = normalizedCmd.match(/(?:take me to|navigate to|go to)\s+(.+)/);
-          if (match && match[1]) {
-            startRouteNavigation(match[1].trim());
-          }
-        } else if (normalizedCmd.includes('find nearest') || normalizedCmd.includes('nearest')) {
-          const match = normalizedCmd.match(/(?:find nearest|nearest)\s+(.+)/);
-          if (match && match[1]) {
-            findNearestPlace(match[1].trim());
-          }
-        } else if (normalizedCmd.includes('cancel navigation') || normalizedCmd.includes('stop navigation')) {
-          setNavActive(false);
-          setDestinationCoords(null);
-          setRouteCoords([]);
-          setRouteSteps([]);
-          setSimulatedLoc(null);
-          setIsSimulatingWalk(false);
-          speakIfNotMuted('Navigation stopped.');
-          addHistory('navigation', 'Stopped', null, 'Cancelled');
-        } else if (normalizedCmd.includes('pause navigation')) {
-          setNavActive(false);
-          speakIfNotMuted('Navigation paused.');
-        } else if (normalizedCmd.includes('resume navigation')) {
-          if (routeCoords.length > 0) {
-            setNavActive(true);
-            speakIfNotMuted('Resuming navigation.');
+        if (matchedWakeWord) {
+          const index = cmd.indexOf(matchedWakeWord);
+          const afterWake = cmd.substring(index + matchedWakeWord.length).trim();
+          
+          if (afterWake.length > 0) {
+            processVoiceCommand(afterWake);
           } else {
-            speakIfNotMuted('No active route to resume.');
+            speakIfNotMuted("Yes, how can I help you?");
+            awaitingCommandRef.current = true;
+            if (commandTimeoutRef.current) clearTimeout(commandTimeoutRef.current);
+            commandTimeoutRef.current = window.setTimeout(() => {
+              awaitingCommandRef.current = false;
+            }, 8000);
           }
-        } else if (normalizedCmd.includes('how far')) {
-          if (routeCoords.length > 0) {
-            speakIfNotMuted(`Destination is ${distanceRemaining} meters away, about ${etaMinutes} minutes walking.`);
-          } else {
-            speakIfNotMuted('No active navigation route.');
-          }
-        } else if (normalizedCmd.includes('what is my next turn') || normalizedCmd.includes('next turn')) {
-          if (routeCoords.length > 0 && routeSteps[navStep]) {
-            speakIfNotMuted(`Your next turn is: ${routeSteps[navStep].instruction}`);
-          } else {
-            speakIfNotMuted('No active navigation route.');
-          }
-        } else if (normalizedCmd.includes('repeat instruction')) {
-          if (routeCoords.length > 0 && routeSteps[Math.max(0, navStep - 1)]) {
-            speakIfNotMuted(routeSteps[Math.max(0, navStep - 1)].instruction);
-          } else {
-            speakIfNotMuted('No instructions to repeat.');
-          }
-        } else if (normalizedCmd.includes('what') && normalizedCmd.includes('front')) {
-          handleScene();
-        } else if (normalizedCmd.includes('read') || normalizedCmd.includes('ocr')) {
-          handleOCR();
-        } else if (normalizedCmd.includes('describe') || normalizedCmd.includes('scene')) {
-          handleScene();
-        } else if (normalizedCmd.includes('color')) {
-          handleColor();
-        } else if (normalizedCmd.includes('currency') || normalizedCmd.includes('money')) {
-          handleCurrency();
-        } else if (normalizedCmd.includes('face') || normalizedCmd.includes('person')) {
-          handleFace();
-        } else if (normalizedCmd.includes('stop')) {
-          stopSpeaking();
-          setVoiceMessage('');
-        } else if (normalizedCmd.includes('start') && normalizedCmd.includes('camera')) {
-          if (!cameraOn) startCamera();
         } else {
-          speakIfNotMuted(`Command: ${transcript}. Not recognized.`);
+          if (awaitingCommandRef.current) {
+            awaitingCommandRef.current = false;
+            if (commandTimeoutRef.current) clearTimeout(commandTimeoutRef.current);
+            processVoiceCommand(cmd);
+          } else {
+            console.log("Wake word not detected. Listening ignored.");
+          }
         }
-        addHistory('voice', transcript, null, 'Voice command');
       },
       () => {
         setListening(false);
-        if (settings.voice_automation && !isSpeaking()) {
-          setTimeout(() => {
-            if (settings.voice_automation && !isSpeaking()) {
-              startListeningRef.current();
-            }
-          }, 300);
-        }
+        const restartAfterSpeech = () => {
+          if (isSpeaking()) {
+            setTimeout(restartAfterSpeech, 300);
+          } else if (settings.voice_automation) {
+            startContinuousListening();
+          }
+        };
+        setTimeout(restartAfterSpeech, 400);
       }
     );
-  }, [settings.voice_lang, settings.voice_automation, isSpeaking, handleScene, handleOCR, handleColor, handleCurrency, handleFace, cameraOn, startCamera, speakIfNotMuted, addHistory, startRouteNavigation, findNearestPlace, routeCoords, routeSteps, navStep, distanceRemaining, etaMinutes]);
+  }, [settings.voice_automation, speakIfNotMuted, processVoiceCommand]);
 
   // Sync ref to break circular dependency
   useEffect(() => {
@@ -736,6 +1085,52 @@ export default function Dashboard({ onExit }: DashboardProps) {
     };
   }, [settings.voice_automation, startContinuousListening]);
 
+  // Keyboard shortcut listener effect
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const activeEl = document.activeElement;
+      if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'SELECT' || activeEl.tagName === 'TEXTAREA')) {
+        return;
+      }
+      
+      switch (e.key.toLowerCase()) {
+        case ' ':
+          e.preventDefault();
+          if (cameraOn) stopCamera();
+          else startCamera();
+          break;
+        case 'o':
+          if (cameraOn) handleOCR();
+          break;
+        case 's':
+          if (cameraOn) handleScene();
+          break;
+        case 'c':
+          if (cameraOn) handleColor();
+          break;
+        case 'f':
+          if (cameraOn) handleFace();
+          break;
+        case 'v':
+          handleVoiceCommand();
+          break;
+        case 'm':
+          setMuted(m => !m);
+          break;
+        case 'd':
+          if (navActive) {
+            simulateDeviation();
+          }
+          break;
+        case 'e':
+          handleSos();
+          break;
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [cameraOn, navActive, handleOCR, handleScene, handleColor, handleFace, handleSos, startCamera, stopCamera, simulateDeviation]);
+
   // Standard Voice manual trigger callback
   const handleVoiceCommand = useCallback(() => {
     if (!speechHelperRef.current?.isSupported()) {
@@ -755,105 +1150,19 @@ export default function Dashboard({ onExit }: DashboardProps) {
     
     // Single prompt start
     setListening(true);
-    speechHelperRef.current.start(
-      (transcript) => {
-        setListening(false);
-        const cmd = transcript.toLowerCase();
-        
-        let normalizedCmd = cmd;
-        if (cmd.includes('चेहरा') || cmd.includes('फेस') || cmd.includes('முகம்')) {
-          normalizedCmd += ' face';
+    speakIfNotMuted('Listening for command.');
+    setTimeout(() => {
+      speechHelperRef.current?.start(
+        (transcript) => {
+          setListening(false);
+          processVoiceCommand(transcript);
+        },
+        () => {
+          setListening(false);
         }
-        if (cmd.includes('पढ़ें') || cmd.includes('टेक्स्ट') || cmd.includes('வாசி')) {
-          normalizedCmd += ' read';
-        }
-        if (cmd.includes('वर्णन') || cmd.includes('दृश्य') || cmd.includes('விளக்கு')) {
-          normalizedCmd += ' describe';
-        }
-        if (cmd.includes('रंग') || cmd.includes('நிறம்') || cmd.includes('రంగు')) {
-          normalizedCmd += ' color';
-        }
-        if (cmd.includes('पैसे') || cmd.includes('रुपये') || cmd.includes('பணம்') || cmd.includes('డబ్బు')) {
-          normalizedCmd += ' currency';
-        }
-        if (cmd.includes('रोकें') || cmd.includes('बंद') || cmd.includes('நிறுத்து') || cmd.includes('ఆపు')) {
-          normalizedCmd += ' stop';
-        }
-
-        if (normalizedCmd.includes('take me to') || normalizedCmd.includes('navigate to') || normalizedCmd.includes('go to')) {
-          const match = normalizedCmd.match(/(?:take me to|navigate to|go to)\s+(.+)/);
-          if (match && match[1]) {
-            startRouteNavigation(match[1].trim());
-          }
-        } else if (normalizedCmd.includes('find nearest') || normalizedCmd.includes('nearest')) {
-          const match = normalizedCmd.match(/(?:find nearest|nearest)\s+(.+)/);
-          if (match && match[1]) {
-            findNearestPlace(match[1].trim());
-          }
-        } else if (normalizedCmd.includes('cancel navigation') || normalizedCmd.includes('stop navigation')) {
-          setNavActive(false);
-          setDestinationCoords(null);
-          setRouteCoords([]);
-          setRouteSteps([]);
-          setSimulatedLoc(null);
-          setIsSimulatingWalk(false);
-          speakIfNotMuted('Navigation stopped.');
-          addHistory('navigation', 'Stopped', null, 'Cancelled');
-        } else if (normalizedCmd.includes('pause navigation')) {
-          setNavActive(false);
-          speakIfNotMuted('Navigation paused.');
-        } else if (normalizedCmd.includes('resume navigation')) {
-          if (routeCoords.length > 0) {
-            setNavActive(true);
-            speakIfNotMuted('Resuming navigation.');
-          } else {
-            speakIfNotMuted('No active route to resume.');
-          }
-        } else if (normalizedCmd.includes('how far')) {
-          if (routeCoords.length > 0) {
-            speakIfNotMuted(`Destination is ${distanceRemaining} meters away, about ${etaMinutes} minutes walking.`);
-          } else {
-            speakIfNotMuted('No active navigation route.');
-          }
-        } else if (normalizedCmd.includes('what is my next turn') || normalizedCmd.includes('next turn')) {
-          if (routeCoords.length > 0 && routeSteps[navStep]) {
-            speakIfNotMuted(`Your next turn is: ${routeSteps[navStep].instruction}`);
-          } else {
-            speakIfNotMuted('No active navigation route.');
-          }
-        } else if (normalizedCmd.includes('repeat instruction')) {
-          if (routeCoords.length > 0 && routeSteps[Math.max(0, navStep - 1)]) {
-            speakIfNotMuted(routeSteps[Math.max(0, navStep - 1)].instruction);
-          } else {
-            speakIfNotMuted('No instructions to repeat.');
-          }
-        } else if (normalizedCmd.includes('what') && normalizedCmd.includes('front')) {
-          handleScene();
-        } else if (normalizedCmd.includes('read') || normalizedCmd.includes('ocr')) {
-          handleOCR();
-        } else if (normalizedCmd.includes('describe') || normalizedCmd.includes('scene')) {
-          handleScene();
-        } else if (normalizedCmd.includes('color')) {
-          handleColor();
-        } else if (normalizedCmd.includes('currency') || normalizedCmd.includes('money')) {
-          handleCurrency();
-        } else if (normalizedCmd.includes('face') || normalizedCmd.includes('person')) {
-          handleFace();
-        } else if (normalizedCmd.includes('stop')) {
-          stopSpeaking();
-          setVoiceMessage('');
-        } else if (normalizedCmd.includes('start') && normalizedCmd.includes('camera')) {
-          if (!cameraOn) startCamera();
-        } else {
-          speakIfNotMuted(`Command: ${transcript}. Not recognized.`);
-        }
-        addHistory('voice', transcript, null, 'Voice command');
-      },
-      () => {
-        setListening(false);
-      }
-    );
-  }, [handleScene, handleOCR, handleColor, handleCurrency, handleFace, cameraOn, startCamera, speakIfNotMuted, addHistory, startRouteNavigation, findNearestPlace, routeCoords, routeSteps, navStep, distanceRemaining, etaMinutes, settings.voice_automation]);
+      );
+    }, 1500);
+  }, [settings.voice_automation, speakIfNotMuted, processVoiceCommand]);
 
   // SOS
   const handleSos = useCallback(async () => {
@@ -951,7 +1260,17 @@ export default function Dashboard({ onExit }: DashboardProps) {
   const detections = visionResult?.objects || [];
 
   if (view === 'admin') return <AdminView onBack={() => setView('dashboard')} history={history} fps={fps} />;
-  if (view === 'settings') return <SettingsView onBack={() => setView('dashboard')} settings={settings} setSettings={setSettings} contacts={contacts} setContacts={setContacts} />;
+  if (view === 'settings') return (
+    <SettingsView 
+      onBack={() => setView('dashboard')} 
+      settings={settings} 
+      setSettings={setSettings} 
+      contacts={contacts} 
+      setContacts={setContacts} 
+      registeredFaces={registeredFaces}
+      setRegisteredFaces={setRegisteredFaces}
+    />
+  );
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col justify-between">
@@ -1006,14 +1325,14 @@ export default function Dashboard({ onExit }: DashboardProps) {
           {/* Left: Webcam & Emergency SOS controls */}
           <div className="lg:col-span-5 space-y-4">
             <div className="bg-white rounded-2xl card-shadow border border-slate-100 overflow-hidden">
-              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between bg-gradient-to-r from-blue-50 to-white">
                 <div className="flex items-center gap-2">
                   <Camera className="w-5 h-5 text-primary-600" />
                   <span className="font-semibold text-slate-700">Live Glasses Camera</span>
                 </div>
                 <div className="flex items-center gap-3 text-xs">
                   {analyzing && (
-                    <span className="flex items-center gap-1 px-2 py-1 rounded-full bg-accent-500/10 text-accent-600 font-medium">
+                    <span className="flex items-center gap-1 px-2 py-1 rounded-full bg-accent-500/10 text-accent-600 font-medium animate-pulse">
                       <Loader2 className="w-3 h-3 animate-spin" /> AI
                     </span>
                   )}
@@ -1031,17 +1350,43 @@ export default function Dashboard({ onExit }: DashboardProps) {
                     }`} />
                     {cameraStatus === 'on' ? 'Live' : cameraStatus === 'starting' ? 'Starting...' : cameraStatus === 'error' ? 'Error' : 'Off'}
                   </span>
-                  {cameraOn && <span className="text-slate-500 font-mono">{fps} FPS</span>}
+                  {cameraOn && <span className="text-slate-500 font-mono font-bold">{fps} FPS</span>}
                 </div>
               </div>
-              <div className="relative aspect-video bg-slate-900">
+
+              {/* Status HUD ribbon */}
+              <div className="grid grid-cols-5 gap-1 bg-slate-50 border-b border-slate-100 p-2.5 text-[10px] font-semibold text-slate-500 text-center">
+                <div className="border-r border-slate-200">
+                  <span className="block text-slate-400 font-bold uppercase text-[8px] leading-none mb-0.5">Battery</span>
+                  <span className={`font-bold ${batteryLevel <= 15 ? 'text-error-500 animate-pulse' : 'text-slate-700'}`}>{batteryLevel}%</span>
+                </div>
+                <div className="border-r border-slate-200">
+                  <span className="block text-slate-400 font-bold uppercase text-[8px] leading-none mb-0.5">Speed</span>
+                  <span className="font-bold text-slate-700">{speedMps} m/s</span>
+                </div>
+                <div className="border-r border-slate-200">
+                  <span className="block text-slate-400 font-bold uppercase text-[8px] leading-none mb-0.5">GPS</span>
+                  <span className="font-bold text-success-600">Active</span>
+                </div>
+                <div className="border-r border-slate-200">
+                  <span className="block text-slate-400 font-bold uppercase text-[8px] leading-none mb-0.5">AI Engine</span>
+                  <span className="font-bold text-primary-600 font-mono">Coco/Cloud</span>
+                </div>
+                <div>
+                  <span className="block text-slate-400 font-bold uppercase text-[8px] leading-none mb-0.5">Mic</span>
+                  <span className={`font-bold ${listening ? 'text-success-600 animate-pulse' : 'text-slate-700'}`}>{listening ? 'Listening' : 'Standby'}</span>
+                </div>
+              </div>
+
+              <div className="relative aspect-video bg-slate-950">
                 <video ref={videoRef} className="w-full h-full object-cover" playsInline muted />
+                <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-cover pointer-events-none z-10" />
                 {cameraOn && (
-                  <div className="absolute top-3 left-3 flex flex-col gap-1.5">
+                  <div className="absolute top-3 left-3 flex flex-col gap-1.5 z-20">
                     {detections.slice(0, 4).map((d, i) => (
-                      <div key={i} className={`px-2 py-1 rounded-lg text-xs font-medium text-white backdrop-blur-sm ${
-                        d.distanceMeters <= 1 ? 'bg-error-500/80' :
-                        d.distanceMeters <= 2 ? 'bg-warning-500/80' : 'bg-success-500/80'
+                      <div key={i} className={`px-2.5 py-1 rounded-lg text-[10px] font-bold text-white backdrop-blur-md shadow-sm border border-white/10 ${
+                        d.distanceMeters <= 1 ? 'bg-rose-600/90' :
+                        d.distanceMeters <= 2 ? 'bg-amber-500/90' : 'bg-emerald-600/90'
                       }`}>
                         {d.class} · {d.distance} · {d.position}
                       </div>
@@ -1049,22 +1394,22 @@ export default function Dashboard({ onExit }: DashboardProps) {
                   </div>
                 )}
                 {analyzing && (
-                  <div className="absolute bottom-3 right-3 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900/80 backdrop-blur-sm">
+                  <div className="absolute bottom-3 right-3 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900/80 backdrop-blur-sm z-20 border border-slate-800">
                     <Loader2 className="w-4 h-4 text-accent-400 animate-spin" />
-                    <span className="text-xs text-white">Analyzing...</span>
+                    <span className="text-xs text-white font-medium">Analyzing...</span>
                   </div>
                 )}
                 {!cameraOn && (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
-                    <CameraOff className="w-16 h-16 mb-4 opacity-50" />
-                    <p className="text-sm">Camera is off</p>
-                    <p className="text-xs mt-1">Click Start to begin AI analysis</p>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400 bg-slate-900">
+                    <CameraOff className="w-16 h-16 mb-4 opacity-30 text-primary-400" />
+                    <p className="text-sm font-semibold">Camera Stream Offline</p>
+                    <p className="text-xs text-slate-500 mt-1">Activate the webcam simulator to begin AI bounding boxes</p>
                   </div>
                 )}
                 {cameraStatus === 'error' && (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center text-error-400">
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-error-400 bg-slate-900">
                     <AlertCircle className="w-12 h-12 mb-3" />
-                    <p className="text-sm">Camera access denied</p>
+                    <p className="text-sm font-semibold">Camera Access Blocked</p>
                   </div>
                 )}
               </div>
@@ -1073,7 +1418,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
                   <button
                     onClick={() => startCamera()}
                     disabled={cameraStatus === 'starting'}
-                    className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-primary-600 to-accent-500 text-white font-semibold flex items-center justify-center gap-2 hover:shadow-lg transition-all disabled:opacity-50"
+                    className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-primary-600 to-accent-500 text-white font-semibold flex items-center justify-center gap-2 hover:shadow-lg hover:brightness-105 transition-all disabled:opacity-50"
                   >
                     <Play className="w-5 h-5" /> Start Camera
                   </button>
@@ -1081,13 +1426,13 @@ export default function Dashboard({ onExit }: DashboardProps) {
                   <>
                     <button
                       onClick={stopCamera}
-                      className="flex-1 px-4 py-3 rounded-xl bg-error-500 text-white font-semibold flex items-center justify-center gap-2 hover:bg-error-600 transition-all"
+                      className="flex-1 px-4 py-3 rounded-xl bg-error-500 hover:bg-error-600 text-white font-semibold flex items-center justify-center gap-2 hover:shadow-md transition-all"
                     >
                       <Square className="w-5 h-5" /> Stop Camera
                     </button>
                     <button
                       onClick={toggleCamera}
-                      className="px-4 py-3 rounded-xl bg-slate-100 text-slate-700 font-semibold flex items-center justify-center gap-2 hover:bg-slate-200 transition-all"
+                      className="px-4 py-3 rounded-xl bg-slate-100 text-slate-700 font-semibold flex items-center justify-center gap-2 hover:bg-slate-200 transition-all border border-slate-200"
                       title="Flip Camera"
                     >
                       <RefreshCw className="w-5 h-5" /> Flip
@@ -1134,6 +1479,47 @@ export default function Dashboard({ onExit }: DashboardProps) {
               <AlertTriangle className="w-6 h-6 animate-pulse" />
               TRIGGER EMERGENCY SOS
             </button>
+
+            {/* Keyboard Shortcuts Accessibility Guide */}
+            <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4">
+              <h3 className="font-semibold text-slate-700 mb-2.5 text-xs flex items-center gap-2">
+                <Shield className="w-4 h-4 text-primary-600 animate-pulse" /> Accessibility Shortcuts
+              </h3>
+              <div className="grid grid-cols-2 gap-2 text-[10px] text-slate-500">
+                <div className="flex items-center justify-between p-1.5 rounded bg-slate-50 border border-slate-100">
+                  <span className="font-medium">Camera</span>
+                  <kbd className="px-1.5 py-0.5 bg-white border rounded shadow-sm font-semibold">Space</kbd>
+                </div>
+                <div className="flex items-center justify-between p-1.5 rounded bg-slate-50 border border-slate-100">
+                  <span className="font-medium">Voice Mic</span>
+                  <kbd className="px-1.5 py-0.5 bg-white border rounded shadow-sm font-semibold">V</kbd>
+                </div>
+                <div className="flex items-center justify-between p-1.5 rounded bg-slate-50 border border-slate-100">
+                  <span className="font-medium">Read Text</span>
+                  <kbd className="px-1.5 py-0.5 bg-white border rounded shadow-sm font-semibold">O</kbd>
+                </div>
+                <div className="flex items-center justify-between p-1.5 rounded bg-slate-50 border border-slate-100">
+                  <span className="font-medium">Describe</span>
+                  <kbd className="px-1.5 py-0.5 bg-white border rounded shadow-sm font-semibold">S</kbd>
+                </div>
+                <div className="flex items-center justify-between p-1.5 rounded bg-slate-50 border border-slate-100">
+                  <span className="font-medium">Color</span>
+                  <kbd className="px-1.5 py-0.5 bg-white border rounded shadow-sm font-semibold">C</kbd>
+                </div>
+                <div className="flex items-center justify-between p-1.5 rounded bg-slate-50 border border-slate-100">
+                  <span className="font-medium">Face</span>
+                  <kbd className="px-1.5 py-0.5 bg-white border rounded shadow-sm font-semibold">F</kbd>
+                </div>
+                <div className="flex items-center justify-between p-1.5 rounded bg-slate-50 border border-slate-100">
+                  <span className="font-medium">Off-Route</span>
+                  <kbd className="px-1.5 py-0.5 bg-white border rounded shadow-sm font-semibold">D</kbd>
+                </div>
+                <div className="flex items-center justify-between p-1.5 rounded bg-slate-50 border border-slate-100">
+                  <span className="font-medium">Mute</span>
+                  <kbd className="px-1.5 py-0.5 bg-white border rounded shadow-sm font-semibold">M</kbd>
+                </div>
+              </div>
+            </div>
           </div>
 
           {/* Center: Live Voice Navigation HUD & Interactive Map */}
@@ -1288,22 +1674,48 @@ export default function Dashboard({ onExit }: DashboardProps) {
           {/* Right: Voice Output & History details */}
           <div className="lg:col-span-3 space-y-4">
             <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4">
-              <h3 className="font-semibold text-slate-700 mb-3 flex items-center gap-2">
-                <Volume2 className="w-5 h-5 text-primary-600" /> Voice Output
-              </h3>
-              <div className="bg-slate-50 rounded-xl p-3 min-h-[80px] flex items-center">
-                {voiceMessage ? (
-                  <p className="text-sm text-slate-600 leading-relaxed">{voiceMessage}</p>
-                ) : (
-                  <p className="text-sm text-slate-400">Voice output will appear here</p>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-semibold text-slate-700 flex items-center gap-2">
+                  <Volume2 className="w-5 h-5 text-primary-600" /> Voice Output
+                </h3>
+                {/* Voice animation wave */}
+                {(listening || speakingState) && (
+                  <div className="flex items-center gap-0.5 h-4">
+                    <span className="w-0.5 h-2 bg-primary-500 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }} />
+                    <span className="w-0.5 h-3 bg-accent-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }} />
+                    <span className="w-0.5 h-4 bg-primary-600 rounded-full animate-bounce" style={{ animationDelay: '0.3s' }} />
+                    <span className="w-0.5 h-2 bg-accent-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }} />
+                  </div>
                 )}
               </div>
-              <button
-                onClick={() => { stopSpeaking(); setVoiceMessage(''); }}
-                className="mt-2 w-full py-2 rounded-lg bg-slate-100 text-slate-600 text-sm font-medium hover:bg-slate-200 transition-colors flex items-center justify-center gap-2"
-              >
-                <Square className="w-4 h-4" /> Stop Speaking
-              </button>
+              <div className="bg-slate-50 rounded-xl p-3 min-h-[80px] flex flex-col justify-center relative overflow-hidden">
+                {voiceMessage ? (
+                  <p className="text-sm text-slate-600 leading-relaxed z-10">{voiceMessage}</p>
+                ) : (
+                  <p className="text-sm text-slate-400 z-10 font-medium">Voice output will appear here</p>
+                )}
+                {/* Visualizer wave bars overlay */}
+                {(listening || speakingState) && (
+                  <div className="absolute inset-x-0 bottom-0 h-1 bg-gradient-to-r from-primary-500 via-accent-500 to-primary-600 animate-pulse opacity-85" />
+                )}
+              </div>
+              <div className="flex gap-1.5 mt-2">
+                <button
+                  onClick={() => { stopSpeaking(); setVoiceMessage(''); }}
+                  className="flex-1 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 border border-slate-200"
+                >
+                  <Square className="w-3.5 h-3.5" /> Stop
+                </button>
+                <button
+                  onClick={handleVoiceCommand}
+                  className={`px-3 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors border ${
+                    listening ? 'bg-success-500 text-white border-success-600 animate-pulse' : 'bg-primary-50 text-primary-600 border-primary-200 hover:bg-primary-100'
+                  }`}
+                  title="Trigger Voice Command (V)"
+                >
+                  <Mic className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
 
             {/* Detections List Panel */}
@@ -1581,17 +1993,30 @@ function AdminView({ onBack, history, fps }: { onBack: () => void; history: Hist
 }
 
 // Settings View
-function SettingsView({ onBack, settings, setSettings, contacts, setContacts }: {
+function SettingsView({ onBack, settings, setSettings, contacts, setContacts, registeredFaces, setRegisteredFaces }: {
   onBack: () => void;
-  settings: AppSettings & { voice_automation?: boolean };
-  setSettings: (s: AppSettings & { voice_automation?: boolean }) => void;
+  settings: AppSettings & { 
+    voice_automation?: boolean;
+    home_address?: string;
+    college_address?: string;
+    favorite_place?: string;
+  };
+  setSettings: (s: any) => void;
   contacts: EmergencyContact[];
   setContacts: (c: EmergencyContact[]) => void;
+  registeredFaces: string[];
+  setRegisteredFaces: (f: string[]) => void;
 }) {
-  const [local, setLocal] = useState<AppSettings & { voice_automation?: boolean }>(settings);
+  const [local, setLocal] = useState<AppSettings & { 
+    voice_automation?: boolean;
+    home_address?: string;
+    college_address?: string;
+    favorite_place?: string;
+  }>(settings);
   const [newContact, setNewContact] = useState({ name: '', phone: '', relation: '' });
   const [openRouterKey, setOpenRouterKey] = useState('');
   const [isKeyConfigured, setIsKeyConfigured] = useState(false);
+  const [newFaceLabel, setNewFaceLabel] = useState('');
 
   useEffect(() => {
     (async () => {
@@ -1615,7 +2040,7 @@ function SettingsView({ onBack, settings, setSettings, contacts, setContacts }: 
     localStorage.setItem('visionassist_settings', JSON.stringify(local));
     try {
       const { data } = await supabase.from('app_settings').select('id').limit(1).maybeSingle();
-      const { voice_automation, ...dbSettings } = local;
+      const { voice_automation, home_address, college_address, favorite_place, ...dbSettings } = local;
       if (data?.id) {
         await supabase.from('app_settings').update({ ...dbSettings, updated_at: new Date().toISOString() }).eq('id', data.id);
       } else {
@@ -1672,6 +2097,20 @@ function SettingsView({ onBack, settings, setSettings, contacts, setContacts }: 
     } catch (e) {
       console.warn('Failed to delete contact from Supabase:', e);
     }
+  };
+
+  const addFace = () => {
+    if (!newFaceLabel) return;
+    const updated = [...registeredFaces, newFaceLabel];
+    setRegisteredFaces(updated);
+    localStorage.setItem('visionassist_registered_faces', JSON.stringify(updated));
+    setNewFaceLabel('');
+  };
+
+  const removeFace = (name: string) => {
+    const updated = registeredFaces.filter(f => f !== name);
+    setRegisteredFaces(updated);
+    localStorage.setItem('visionassist_registered_faces', JSON.stringify(updated));
   };
 
   return (
@@ -1746,6 +2185,59 @@ function SettingsView({ onBack, settings, setSettings, contacts, setContacts }: 
                   <option value="high">High (720p)</option>
                 </select>
               </div>
+            </div>
+          </div>
+
+          {/* AI Memory Locations Configuration */}
+          <div className="bg-white rounded-2xl p-6 card-shadow border border-slate-100">
+            <h3 className="font-bold text-slate-700 mb-4 flex items-center gap-2">
+              <Shield className="w-5 h-5 text-primary-600" /> AI Memory Locations
+            </h3>
+            <div className="space-y-4">
+              <div>
+                <label className="text-sm font-medium text-slate-600 block mb-2">Home Address / Destination</label>
+                <input type="text" placeholder="e.g. Marina Beach, Chennai" value={local.home_address || ''}
+                  onChange={(e) => setLocal({ ...local, home_address: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-primary-300 focus:outline-none" />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-600 block mb-2">College Address / Destination</label>
+                <input type="text" placeholder="e.g. Agni College of Technology" value={local.college_address || ''}
+                  onChange={(e) => setLocal({ ...local, college_address: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-primary-300 focus:outline-none" />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-600 block mb-2">Favorite Place Address / Destination</label>
+                <input type="text" placeholder="e.g. Apollo Hospital" value={local.favorite_place || ''}
+                  onChange={(e) => setLocal({ ...local, favorite_place: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-primary-300 focus:outline-none" />
+              </div>
+            </div>
+          </div>
+
+          {/* Registered Faces */}
+          <div className="bg-white rounded-2xl p-6 card-shadow border border-slate-100">
+            <h3 className="font-bold text-slate-700 mb-4 flex items-center gap-2">
+              <ScanFace className="w-5 h-5 text-primary-600" /> Registered Familiar Faces
+            </h3>
+            <div className="space-y-2 mb-4">
+              {registeredFaces.map((f, i) => (
+                <div key={i} className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 border border-slate-100">
+                  <span className="flex-1 font-semibold text-slate-700">{f}</span>
+                  <button onClick={() => removeFace(f)} className="p-1.5 rounded-lg hover:bg-error-500/10 transition-colors">
+                    <X className="w-4 h-4 text-error-500" />
+                  </button>
+                </div>
+              ))}
+              {registeredFaces.length === 0 && (
+                <p className="text-xs text-slate-400 text-center py-2">No familiar faces registered yet.</p>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <input type="text" placeholder="Face Label (e.g. Raj, Mother)" value={newFaceLabel}
+                onChange={(e) => setNewFaceLabel(e.target.value)}
+                className="flex-1 px-3 py-2 text-sm rounded-lg border border-slate-200 focus:border-primary-300 focus:outline-none" />
+              <button onClick={addFace} className="px-4 py-2 text-sm rounded-lg bg-primary-600 text-white font-medium hover:bg-primary-700 transition-colors">Register</button>
             </div>
           </div>
 
