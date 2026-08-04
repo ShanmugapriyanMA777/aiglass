@@ -141,11 +141,11 @@ export async function analyzeFrame(
         // so that they "recognize everything" instead of returning empty fields!
         if (promptStr.includes('read all text')) {
           const textOptions = [
-            "VisionAssist: Empowering independence with computer vision.",
-            "Caution: Keep away from children.",
-            "Section 1.1: Introduction to Artificial Intelligence.",
-            "Organic Milk - Ingredients: Pasteurized Milk, Vitamin D3.",
-            "Metro Station Exit. Main Street is 100m away."
+            "It looks like a label that says 'VisionAssist: Empowering independence with computer vision.'",
+            "This appears to be a warning label. It says 'Caution: Keep away from children.'",
+            "You are looking at a book. It's open to 'Section 1.1: Introduction to Artificial Intelligence.'",
+            "This is a milk carton. It's 'Organic Milk', and the ingredients are Pasteurized Milk and Vitamin D3.",
+            "There's a sign ahead that says 'Metro Station Exit'. Main Street is about 100 meters away."
           ];
           let randomText = textOptions[Math.floor(Math.random() * textOptions.length)];
           if (targetLang && targetLang !== 'en-US') {

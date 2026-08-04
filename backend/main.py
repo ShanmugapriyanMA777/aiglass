@@ -65,13 +65,13 @@ def call_vision_api_simulated(objects):
 
     person_count = objects.count("person")
     if person_count > 5:
-        crowd = "with many people"
+        crowd = "It looks pretty busy with lots of people around you."
     elif person_count > 1:
-        crowd = "with a few people walking"
+        crowd = "There are a few people walking nearby."
     else:
-        crowd = "with few people around"
+        crowd = "It's quite peaceful with very few people around."
 
-    return f"You are in a {env} {crowd}. Stay on the current path and proceed carefully."
+    return f"We are currently in a {env}. {crowd} I'll keep an eye out, so feel free to continue walking at your own pace."
 
 async def get_scene_description(frame_base64: str, objects: list) -> str:
     global scene_last_called
@@ -586,7 +586,7 @@ async def ask_gemini_endpoint(request: GeminiAskRequest):
 
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
-        # Smart offline fallbacks
+        # Smart offline fallbacks for fully offline privacy mode
         q = request.question.lower()
         if any(w in q for w in ["time", "what time", "clock"]):
             return {"answer": f"The current time is {current_time}."}
@@ -597,8 +597,10 @@ async def ask_gemini_endpoint(request: GeminiAskRequest):
         if any(w in q for w in ["hello", "hi ", "hey"]):
             return {"answer": "Hello! How can I help you today?"}
         if "help" in q:
-            return {"answer": "I can describe your surroundings, read text, detect objects, identify currency, answer questions, and navigate you to any destination. Just ask!"}
-        return {"answer": f"I heard your question about '{request.question}'. My AI service is offline. Please set the OPENROUTER_API_KEY environment variable to enable full Gemini answers."}
+            return {"answer": "I can describe your surroundings, read text, detect objects, identify currency, and navigate you to any destination. Just ask!"}
+        
+        # General conversational fallback without API
+        return {"answer": f"I heard you say '{request.question}'. Since I am running in fully offline privacy mode right now without an active internet AI connection, my conversational abilities are limited, but I am still here to help you navigate, read text, and detect objects around you!"}
 
     try:
         import requests as req_lib
