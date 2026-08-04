@@ -13,11 +13,13 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const { image, prompt, lang } = await req.json();
+    const body = await req.json();
+    const { image, prompt, lang, textOnly } = body;
 
-    if (!image) {
+    // For non-visual queries (GK, general questions), textOnly=true means no image is needed
+    if (!textOnly && !image) {
       return new Response(
-        JSON.stringify({ error: "Image data is required" }),
+        JSON.stringify({ error: "Image data is required for visual analysis" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
@@ -73,6 +75,17 @@ Detect up to 8 objects. Use lowercase class names. Estimate distance from object
 Do NOT translate the JSON keys (e.g. keep keys like "objects", "class", "confidence", "position", "distance", "scene", "text", "colors", "currency", "warning" in English). The response MUST still be valid JSON.`;
     }
 
+    // Build message content: text-only for general questions, multimodal for visual analysis
+    let messageContent: any[];
+    if (textOnly) {
+      messageContent = [{ type: "text", text: activePrompt }];
+    } else {
+      messageContent = [
+        { type: "text", text: activePrompt },
+        { type: "image_url", image_url: { url: image } },
+      ];
+    }
+
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -86,15 +99,13 @@ Do NOT translate the JSON keys (e.g. keep keys like "objects", "class", "confide
         messages: [
           {
             role: "user",
-            content: [
-              { type: "text", text: activePrompt },
-              { type: "image_url", image_url: { url: image } },
-            ],
+            content: messageContent,
           },
         ],
-        max_tokens: 800,
-        temperature: 0.3,
-        response_format: { type: "json_object" },
+        max_tokens: textOnly ? 1024 : 800,
+        temperature: textOnly ? 0.5 : 0.3,
+        // Only force JSON for visual analysis; for text-only Q&A allow free-form
+        ...(textOnly ? {} : { response_format: { type: "json_object" } }),
       }),
     });
 
@@ -113,6 +124,14 @@ Do NOT translate the JSON keys (e.g. keep keys like "objects", "class", "confide
       return new Response(
         JSON.stringify({ error: "No content returned from AI model" }),
         { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // For text-only (GK/general questions), return the raw answer as { answer: "..." }
+    if (textOnly) {
+      return new Response(
+        JSON.stringify({ answer: content.trim() }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 

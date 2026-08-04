@@ -5,16 +5,100 @@ import {
   Scan, Eye, Palette, DollarSign, MapPin, AlertTriangle,
   Navigation, Settings, BarChart3, Home, X, Download, Trash2,
   Play, Square, Clock, TrendingUp, Zap, Brain, Target,
-  CheckCircle2, AlertCircle, Loader2, ScanFace, RefreshCw, Shield,
+  CheckCircle2, AlertCircle, Loader2, ScanFace, RefreshCw, Shield, Glasses,
 } from 'lucide-react';
-import { analyzeFrame, drawBoundingBoxes, getLocalModel, type VisionResult } from '../lib/detection';
+
+const PRIORITY = {
+  CRITICAL: 1,
+  WARNING: 2,
+  INFO: 3,
+  AMBIENT: 4
+};
+
+class VoiceQueue {
+  private queue: { text: string; priority: number }[] = [];
+  private speaking = false;
+  public onStateChange: (active: boolean, text: string, queueSize: number, priority: number) => void = () => {};
+  private currentText = '';
+  private currentPriority = 4;
+  private isMuted: () => boolean = () => false;
+
+  constructor(isMutedGetter: () => boolean) {
+    this.isMuted = isMutedGetter;
+  }
+
+  add(text: string, priority: number) {
+    if (this.queue.length > 5) {
+      this.queue = this.queue.filter(i => i.priority <= 2);
+    }
+    this.queue.push({ text, priority });
+    this.queue.sort((a, b) => a.priority - b.priority);
+    this.onStateChange(this.speaking, this.currentText, this.queue.length, this.currentPriority);
+    this.processSpeech();
+  }
+
+  private processSpeech() {
+    if (this.speaking || this.queue.length === 0) {
+      this.onStateChange(this.speaking, this.currentText, this.queue.length, this.currentPriority);
+      return;
+    }
+    const next = this.queue.shift()!;
+    this.speaking = true;
+    this.currentText = next.text;
+    this.currentPriority = next.priority;
+
+    if (next.priority === 1 && speechSynthesis.speaking) {
+      speechSynthesis.cancel();
+    }
+
+    this.onStateChange(true, this.currentText, this.queue.length, this.currentPriority);
+
+    if (this.isMuted()) {
+      setTimeout(() => {
+        this.speaking = false;
+        this.currentText = '';
+        this.processSpeech();
+      }, 500);
+      return;
+    }
+
+    const utterance = new SpeechSynthesisUtterance(next.text);
+    utterance.rate = 0.9;
+    utterance.pitch = 1.0;
+    utterance.volume = 1.0;
+    utterance.onend = () => {
+      this.speaking = false;
+      this.currentText = '';
+      this.processSpeech();
+    };
+    utterance.onerror = () => {
+      this.speaking = false;
+      this.currentText = '';
+      this.processSpeech();
+    };
+    speechSynthesis.speak(utterance);
+  }
+
+  critical(text: string) { this.add(text, PRIORITY.CRITICAL); }
+  warning(text: string) { this.add(text, PRIORITY.WARNING); }
+  info(text: string) { this.add(text, PRIORITY.INFO); }
+  ambient(text: string) { this.add(text, PRIORITY.AMBIENT); }
+  
+  public getStatus() {
+    return { speaking: this.speaking, text: this.currentText, size: this.queue.length, priority: this.currentPriority };
+  }
+}
+
+import { analyzeFrame, drawBoundingBoxes, getLocalModel, type VisionResult, askGemini, generateVoiceMessage } from '../lib/detection';
 import { speak, stopSpeaking, configureSpeech, SpeechRecognitionHelper, isSpeaking } from '../lib/speech';
 import { supabase, type AppSettings, type EmergencyContact, type DetectionRecord, type ActivityLogEntry, type DetectionType } from '../lib/supabase';
 import MapPanel from './MapPanel';
 import { searchPlaces, getWalkingRoute, getDistanceMeters, type NavigationStep } from '../lib/maps';
+import { getItem, setItem } from '../lib/storage';
 
 interface DashboardProps {
   onExit: () => void;
+  isOffline?: boolean;
 }
 
 type View = 'dashboard' | 'admin' | 'settings';
@@ -28,7 +112,7 @@ interface HistoryEntry {
   action: string;
 }
 
-export default function Dashboard({ onExit }: DashboardProps) {
+export default function Dashboard({ onExit, isOffline = false }: DashboardProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -48,6 +132,39 @@ export default function Dashboard({ onExit }: DashboardProps) {
   const [listening, setListening] = useState(false);
   const [speakingState, setSpeakingState] = useState(false);
   const [ocrText, setOcrText] = useState('');
+
+  // Scene Understanding states & voice queue refs
+  const voiceQueueRef = useRef<VoiceQueue | null>(null);
+  const mutedRef = useRef(muted);
+  useEffect(() => {
+    mutedRef.current = muted;
+  }, [muted]);
+
+  const [trafficColor, setTrafficColor] = useState<string>('--');
+  const [trafficConfirmed, setTrafficConfirmed] = useState<boolean>(false);
+  const [zebraCrossingState, setZebraCrossingState] = useState<string>('NONE');
+  const [vehicleOnCrossing, setVehicleOnCrossing] = useState<boolean>(false);
+  const [sceneActivePulse, setSceneActivePulse] = useState<boolean>(false);
+  
+  const [voiceSpeaking, setVoiceSpeaking] = useState<boolean>(false);
+  const [voiceText, setVoiceText] = useState<string>('');
+  const [voiceQueueSize, setVoiceQueueSize] = useState<number>(0);
+  const [voicePriority, setVoicePriority] = useState<number>(4);
+
+  const prevTrafficColorRef = useRef<string>('--');
+
+  if (!voiceQueueRef.current) {
+    voiceQueueRef.current = new VoiceQueue(() => mutedRef.current);
+    voiceQueueRef.current.onStateChange = (active, text, queueSize, priority) => {
+      setTimeout(() => {
+        setVoiceSpeaking(active);
+        setVoiceText(text);
+        setVoiceQueueSize(queueSize);
+        setVoicePriority(priority);
+      }, 0);
+    };
+  }
+
   const [sceneText, setSceneText] = useState('');
   const [colorResult, setColorResult] = useState<{ name: string; hex: string } | null>(null);
   const [currencyResult, setCurrencyResult] = useState('');
@@ -102,6 +219,188 @@ export default function Dashboard({ onExit }: DashboardProps) {
   const lastSpokenObstaclesRef = useRef<Record<string, { distanceMeters: number; position: string; timestamp: number }>>({});
   const lastOcrTimeRef = useRef<number>(0);
   const localDetectionLoopRef = useRef<number | null>(null);
+
+  const extractDoorNumber = (destName: string): string => {
+    const match = destName.match(/\b\d+\b/);
+    return match ? match[0] : '';
+  };
+
+  const triggerImmediateSceneDescription = async () => {
+    if (!videoRef.current || !canvasRef.current) return;
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+    const base64 = dataUrl.split(',')[1];
+    
+    speakIfNotMuted("Analyzing your surroundings. Please wait.");
+
+    try {
+      const response = await fetch('http://localhost:8000/api/analyze-frame', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          frame_base64: base64,
+          nav_active: navActive,
+          destination_number: extractDoorNumber(navDestination)
+        })
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        if (result.scene_description) {
+          voiceQueueRef.current?.info(result.scene_description);
+          setSceneText(result.scene_description);
+        }
+      }
+    } catch (err) {
+      console.warn('Immediate scene description call failed:', err);
+    }
+  };
+
+  const processSceneResult = useCallback((result: any) => {
+    if (!result) return;
+
+    if (result.scene_updated) {
+      setSceneActivePulse(true);
+      setTimeout(() => setSceneActivePulse(false), 800);
+    }
+
+    const tl = result.traffic_light;
+    const zc = result.zebra_crossing;
+
+    if (tl && tl.detected && tl.confirmed) {
+      setTrafficColor(tl.color);
+      setTrafficConfirmed(true);
+
+      const prevColor = prevTrafficColorRef.current;
+      if (tl.color !== prevColor) {
+        if (prevColor === 'RED' && tl.color === 'GREEN') {
+          voiceQueueRef.current?.critical("Light has changed to green. You may cross now.");
+        } else if (prevColor === 'GREEN' && tl.color === 'RED') {
+          voiceQueueRef.current?.critical("Light has changed to red. Please stop immediately.");
+        }
+        prevTrafficColorRef.current = tl.color;
+      }
+
+      if (tl.should_announce) {
+        if (!zc || !zc.detected) {
+          if (tl.low_light) {
+            voiceQueueRef.current?.warning("Traffic signal ahead. Low light detected. Proceed carefully.");
+          } else if (tl.color === 'RED') {
+            voiceQueueRef.current?.critical("Red light ahead. Please stop and wait.");
+          } else if (tl.color === 'GREEN') {
+            voiceQueueRef.current?.critical("Green light. Safe to cross now. Walk ahead.");
+          } else if (tl.color === 'YELLOW') {
+            voiceQueueRef.current?.warning("Yellow light ahead. Prepare to stop.");
+          }
+        }
+      }
+    } else {
+      setTrafficColor('--');
+      setTrafficConfirmed(false);
+      prevTrafficColorRef.current = '--';
+    }
+
+    if (zc) {
+      setZebraCrossingState(zc.state);
+      setVehicleOnCrossing(zc.vehicle_on_crossing);
+
+      if (zc.detected && zc.should_announce) {
+        if (tl && tl.detected && tl.confirmed) {
+          if (tl.color === "RED") {
+            voiceQueueRef.current?.critical("Red light at zebra crossing. Please wait on the footpath. Do not step onto the crossing.");
+          } else if (tl.color === "GREEN") {
+            voiceQueueRef.current?.critical("Green light at zebra crossing. Safe to cross now. Walk straight across.");
+          } else if (tl.color === "YELLOW") {
+            voiceQueueRef.current?.warning("Yellow light at zebra crossing. Wait for green before crossing.");
+          }
+        } else {
+          if (zc.state === "APPROACHING") {
+            voiceQueueRef.current?.warning("Zebra crossing detected ahead. No traffic light. Look left and right before crossing.");
+          } else if (zc.state === "AT_CROSSING") {
+            voiceQueueRef.current?.warning("You are at the zebra crossing. Check for vehicles then cross carefully.");
+          }
+        }
+      }
+
+      if (zc.detected && zc.vehicle_on_crossing) {
+        voiceQueueRef.current?.critical("Vehicle on the crossing. Stop and wait. Do not cross yet.");
+      }
+    } else {
+      setZebraCrossingState('NONE');
+      setVehicleOnCrossing(false);
+    }
+
+    if (result.ocr_results && result.ocr_results.length > 0) {
+      result.ocr_results.forEach((item: any) => {
+        if (item.category === "CAUTION" || item.category === "EMERGENCY") {
+          voiceQueueRef.current?.warning(item.announcement);
+        } else {
+          voiceQueueRef.current?.info(item.announcement);
+        }
+        setOcrText(`${item.text} (${item.category}) — ${item.direction}`);
+      });
+    }
+
+    if (result.scene_updated && result.scene_description) {
+      voiceQueueRef.current?.ambient(result.scene_description);
+      setSceneText(result.scene_description);
+    }
+  }, []);
+
+  // Frame capture and dispatch loop (500ms intervals)
+  useEffect(() => {
+    if (!cameraOn || !videoRef.current || !canvasRef.current) {
+      return;
+    }
+
+    let intervalId: any = null;
+
+    const dispatchFrame = async () => {
+      if (!videoRef.current || !canvasRef.current) return;
+      const canvas = canvasRef.current;
+      const video = videoRef.current;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+      const base64 = dataUrl.split(',')[1];
+
+      try {
+        const response = await fetch('http://localhost:8000/api/analyze-frame', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            frame_base64: base64,
+            nav_active: navActive,
+            destination_number: extractDoorNumber(navDestination)
+          })
+        });
+
+        if (response.ok) {
+          const result = await response.json();
+          processSceneResult(result);
+        }
+      } catch (err) {
+        console.warn('FastAPI analyze-frame request failed:', err);
+      }
+    };
+
+    intervalId = setInterval(dispatchFrame, 500);
+
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [cameraOn, navActive, navDestination, processSceneResult]);
 
   // Load Geolocation on mount
   useEffect(() => {
@@ -158,13 +457,13 @@ export default function Dashboard({ onExit }: DashboardProps) {
           if (newSettings) loadedSettings = { ...loadedSettings, ...newSettings };
         }
       } catch (e) {
-        console.warn('Supabase settings query failed, falling back to localStorage:', e);
+        if (!isOffline) console.warn('Supabase settings query failed, falling back to IndexedDB/localStorage:', e);
       }
 
-      const localData = localStorage.getItem('visionassist_settings');
+      const localData = await getItem<string | null>('visionassist_settings', null);
       if (localData) {
         try {
-          const parsed = JSON.parse(localData);
+          const parsed = typeof localData === 'string' ? JSON.parse(localData) : localData;
           loadedSettings.voice_automation = parsed.voice_automation || false;
           loadedSettings.home_address = parsed.home_address || '';
           loadedSettings.college_address = parsed.college_address || '';
@@ -173,22 +472,22 @@ export default function Dashboard({ onExit }: DashboardProps) {
           console.debug('Failed to parse settings');
         }
       } else {
-        localStorage.setItem('visionassist_settings', JSON.stringify(loadedSettings));
+        await setItem('visionassist_settings', loadedSettings);
       }
       setSettings(loadedSettings);
       configureSpeech(loadedSettings.voice_speed || 1.0, loadedSettings.voice_lang || 'en-US');
 
       // Load registered faces
-      const savedFaces = localStorage.getItem('visionassist_registered_faces');
+      const savedFaces = await getItem<string[] | null>('visionassist_registered_faces', null);
       if (savedFaces) {
         try {
-          setRegisteredFaces(JSON.parse(savedFaces));
+          setRegisteredFaces(typeof savedFaces === 'string' ? JSON.parse(savedFaces) : savedFaces);
         } catch {
           setRegisteredFaces(['Mother', 'Raj']);
         }
       } else {
         const defaultFaces = ['Mother', 'Raj'];
-        localStorage.setItem('visionassist_registered_faces', JSON.stringify(defaultFaces));
+        await setItem('visionassist_registered_faces', defaultFaces);
         setRegisteredFaces(defaultFaces);
       }
 
@@ -198,11 +497,11 @@ export default function Dashboard({ onExit }: DashboardProps) {
         if (contactsErr) throw contactsErr;
         if (data) loadedContacts = data;
       } catch (e) {
-        console.warn('Supabase emergency contacts query failed, falling back to localStorage:', e);
-        const localData = localStorage.getItem('visionassist_contacts');
+        if (!isOffline) console.warn('Supabase emergency contacts query failed, falling back to IndexedDB/localStorage:', e);
+        const localData = await getItem<string | null>('visionassist_contacts', null);
         if (localData) {
           try {
-            loadedContacts = JSON.parse(localData);
+            loadedContacts = typeof localData === 'string' ? JSON.parse(localData) : localData;
           } catch {
             console.debug('Failed to parse contacts');
           }
@@ -210,7 +509,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
           loadedContacts = [
             { id: '1', name: 'Emergency Contact 1', phone: '+91 99999 99999', relation: 'Family' }
           ];
-          localStorage.setItem('visionassist_contacts', JSON.stringify(loadedContacts));
+          await setItem('visionassist_contacts', loadedContacts);
         }
       }
       setContacts(loadedContacts);
@@ -235,11 +534,11 @@ export default function Dashboard({ onExit }: DashboardProps) {
           })));
         }
       } catch (e) {
-        console.warn('Supabase history query failed, falling back to localStorage:', e);
-        const localData = localStorage.getItem('visionassist_history');
+        if (!isOffline) console.warn('Supabase history query failed, falling back to IndexedDB/localStorage:', e);
+        const localData = await getItem<string | null>('visionassist_history', null);
         if (localData) {
           try {
-            setHistory(JSON.parse(localData));
+            setHistory(typeof localData === 'string' ? JSON.parse(localData) : localData);
           } catch {
             console.debug('Failed to parse history');
           }
@@ -252,7 +551,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
     const entry: HistoryEntry = { time: new Date().toLocaleTimeString(), type, label, confidence, action };
     setHistory((h) => {
       const updated = [entry, ...h].slice(0, 100);
-      localStorage.setItem('visionassist_history', JSON.stringify(updated));
+      setItem('visionassist_history', updated); // fire and forget
       return updated;
     });
     try {
@@ -264,25 +563,29 @@ export default function Dashboard({ onExit }: DashboardProps) {
     }
   }, []);
 
-  const speakIfNotMuted = useCallback((text: string) => {
+  const speakIfNotMuted = useCallback((text: string, onEnd?: () => void) => {
     setVoiceMessage(text);
-    if (!muted) {
-      if (speechHelperRef.current) {
-        speechHelperRef.current.stop();
-        setListening(false);
-      }
-      setSpeakingState(true);
-      speak(text, () => {
-        setSpeakingState(false);
-        if (settings.voice_automation) {
-          setTimeout(() => {
-            if (settings.voice_automation && !isSpeaking()) {
-              startListeningRef.current();
-            }
-          }, 400);
-        }
-      });
+    if (muted) {
+      if (onEnd) onEnd();
+      return;
     }
+    if (speechHelperRef.current) {
+      speechHelperRef.current.stop();
+      setListening(false);
+    }
+    setSpeakingState(true);
+    speak(text, () => {
+      setSpeakingState(false);
+      if (onEnd) {
+        onEnd();
+      } else if (settings.voice_automation) {
+        setTimeout(() => {
+          if (settings.voice_automation && !isSpeaking()) {
+            startListeningRef.current();
+          }
+        }, 400);
+      }
+    });
   }, [muted, settings.voice_automation]);
 
   // Battery monitoring simulator
@@ -621,15 +924,35 @@ export default function Dashboard({ onExit }: DashboardProps) {
     setActiveFeature('currency');
     setAnalyzing(true);
     setError('');
-    speakIfNotMuted('Checking currency.');
+    speakIfNotMuted('Scanning for currency note.');
+    const currencyPrompt = `You are an expert Indian Rupee currency recognition system. Carefully examine this image for any Indian Rupee banknote.
+
+Identification guide:
+- ₹10 note: Chocolate brown / orange-brown color. Has the Konark Sun Temple on reverse.
+- ₹20 note: Greenish yellow. Has Ellora Caves on reverse. Has a windmill/scalloped edge on the left.
+- ₹50 note: Fluorescent blue. Has Hampi with chariot on reverse.
+- ₹100 note: Lavender / purple. Has Rani ki Vav (stepwell) on reverse.
+- ₹200 note: Bright yellow. Has Sanchi Stupa on reverse.
+- ₹500 note: Stone grey / slate grey. Has Red Fort on reverse. Has a large '500' in green on front-right.
+- ₹2000 note: Magenta / pink-red. Has Mangalyaan (Mars Orbiter) on reverse. Most commonly a pink colored large note.
+
+All notes feature: Mahatma Gandhi portrait on the right, Reserve Bank of India seal, Ashoka Pillar, the ₹ symbol, and denomination in numerals. Newer notes (post-2016) have a security strip and micro-lettering.
+
+Inspect the image now:
+1. Is a currency note visible?
+2. What denomination is it based on its color, size, and printed features?
+3. State your confidence level.
+
+Respond ONLY with this JSON (no markdown, no explanation outside JSON):
+{"currency": "denomination like '500 rupees' or '₹500 note' or empty string if no note visible", "objects": [], "scene": "", "text": "", "colors": [], "warning": ""}`;
     try {
-      const result = await analyzeFrame(videoRef.current, 'Identify any currency note in this image. Look for Indian Rupee notes (10, 20, 50, 100, 200, 500, 2000). Respond with JSON: {"currency": "value like 500 rupees or empty string", "objects": [], "scene": "", "text": "", "colors": [], "warning": ""}.', settings.voice_lang);
+      const result = await analyzeFrame(videoRef.current, currencyPrompt, settings.voice_lang);
       setCurrencyResult(result.currency);
       if (result.currency) {
-        speakIfNotMuted(`This is ${result.currency}.`);
+        speakIfNotMuted(`Detected: ${result.currency}.`);
         addHistory('currency', result.currency, null, 'Currency detected');
       } else {
-        speakIfNotMuted('No currency detected.');
+        speakIfNotMuted('No currency note detected. Please hold the note clearly in front of the camera in good lighting.');
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -663,6 +986,37 @@ export default function Dashboard({ onExit }: DashboardProps) {
     }
     setAnalyzing(false);
   }, [speakIfNotMuted, addHistory]);
+
+  // Object Detection
+  const handleObjectDetection = useCallback(async () => {
+    if (!videoRef.current || !streamRef.current) return;
+    setActiveFeature('objects');
+    setAnalyzing(true);
+    setError('');
+    speakIfNotMuted('Detecting objects.');
+    try {
+      const result = await analyzeFrame(
+        videoRef.current,
+        'Identify all key objects in this image. Respond with a JSON object containing the "objects" array with class, confidence, position, and distance. Respond ONLY in the requested JSON format.',
+        settings.voice_lang
+      );
+      if (result.objects && result.objects.length > 0) {
+        speakIfNotMuted(`Detected ${result.objects.length} objects.`);
+        result.objects.forEach((obj) => {
+          const msg = generateVoiceMessage(obj);
+          voiceQueueRef.current?.info(msg);
+        });
+        addHistory('object', `Detected ${result.objects.length} objects`, null, 'Objects detected');
+      } else {
+        speakIfNotMuted('No objects detected.');
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setError(errMsg);
+      speakIfNotMuted('Object detection failed.');
+    }
+    setAnalyzing(false);
+  }, [speakIfNotMuted, addHistory, settings.voice_lang]);
 
 
 
@@ -976,10 +1330,49 @@ export default function Dashboard({ onExit }: DashboardProps) {
     }
 
     // Navigation and route management
-    if (normalizedCmd.includes('take me to') || normalizedCmd.includes('navigate to') || normalizedCmd.includes('go to')) {
-      const match = normalizedCmd.match(/(?:take me to|navigate to|go to)\s+(.+)/);
-      if (match && match[1]) {
-        startRouteNavigation(match[1].trim());
+    const isNavigate = 
+      normalizedCmd.includes('navigate') || 
+      normalizedCmd.includes('take me to') || 
+      normalizedCmd.includes('go to') ||
+      normalizedCmd.includes('नेविगेट') || 
+      normalizedCmd.includes('रास्ता') || 
+      normalizedCmd.includes('வழி') || 
+      normalizedCmd.includes('మార్గ') ||
+      normalizedCmd.includes('ಮಾರ್ಗ') ||
+      normalizedCmd.includes('चलो') ||
+      normalizedCmd.includes('போ') ||
+      normalizedCmd.includes('వెళ్ళు');
+
+    if (isNavigate) {
+      // Helper function to extract destination
+      const extractDestination = (text: string): string | null => {
+        let cleaned = text.toLowerCase().trim();
+        
+        // Remove common english prefixes
+        cleaned = cleaned.replace(/^(?:take me to|navigate to|go to|navigate)\s+/i, '');
+        cleaned = cleaned.replace(/\s+(?:navigate)$/i, '');
+
+        // Remove common regional language navigation keywords
+        const stopWords = [
+          'के लिए रास्ता', 'रास्ता दिखाओ', 'नेविगेट करो', 'नेविगेट', 'चलो', 'ले चलो',
+          'வழி', 'நெவிகேட்', 'போ', 'கூட்டிச்செல்',
+          'మార్గం', 'వెళ్ళు', 'తీసుకెళ్ళు',
+          'ಮಾರ್ಗ', 'ಹೋಗು', 'ಕರೆದೊಯ್ಯು'
+        ];
+
+        for (const word of stopWords) {
+          cleaned = cleaned.replace(new RegExp(word, 'g'), '');
+        }
+
+        cleaned = cleaned.trim();
+        return cleaned.length > 0 ? cleaned : null;
+      };
+
+      const dest = extractDestination(normalizedCmd);
+      if (dest) {
+        startRouteNavigation(dest);
+      } else {
+        speakIfNotMuted("Please specify a place to navigate.");
       }
     } else if (normalizedCmd.includes('find nearest') || normalizedCmd.includes('nearest')) {
       const match = normalizedCmd.match(/(?:find nearest|nearest)\s+(.+)/);
@@ -1031,6 +1424,78 @@ export default function Dashboard({ onExit }: DashboardProps) {
         speakIfNotMuted('No instructions to repeat.');
       }
     }
+    // Scene Understanding Module Commands
+    else if (normalizedCmd.includes('what is around me') || normalizedCmd.includes('describe my surroundings') || normalizedCmd.includes('surroundings')) {
+      triggerImmediateSceneDescription();
+    } else if (
+      normalizedCmd.includes('detect objects') || 
+      normalizedCmd.includes('tell the objects') || 
+      normalizedCmd.includes('what objects') || 
+      normalizedCmd.includes('list objects') || 
+      normalizedCmd === 'objects' || 
+      normalizedCmd.includes('object detection') ||
+      normalizedCmd.includes('वस्तुओं') ||
+      normalizedCmd.includes('பொருட்கள்') ||
+      normalizedCmd.includes('వస్తువులు') ||
+      normalizedCmd.includes('ವಸ್ತುಗಳು')
+    ) {
+      handleObjectDetection();
+    } else if (normalizedCmd.includes('read the signs') || normalizedCmd.includes('what does it say') || normalizedCmd.includes('read signs') || normalizedCmd.includes('it say')) {
+      speakIfNotMuted("Reading signs.");
+      if (videoRef.current && canvasRef.current) {
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+          const base64 = canvas.toDataURL('image/jpeg', 0.7).split(',')[1];
+          try {
+            const res = await fetch('http://localhost:8000/api/analyze-frame', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                frame_base64: base64,
+                nav_active: navActive,
+                destination_number: extractDoorNumber(navDestination)
+              })
+            });
+            if (res.ok) {
+              const data = await res.json();
+              if (data.ocr_results && data.ocr_results.length > 0) {
+                data.ocr_results.forEach((item: any) => {
+                  voiceQueueRef.current?.info(item.announcement);
+                });
+              } else {
+                speakIfNotMuted("No text or signs detected.");
+              }
+            }
+          } catch (e) {
+            console.warn(e);
+          }
+        }
+      }
+    } else if (normalizedCmd.includes('safe to cross') || normalizedCmd.includes('safe') || normalizedCmd.includes('cross')) {
+      if (trafficColor === 'RED') {
+        voiceQueueRef.current?.critical("Red light detected. It is not safe to cross yet.");
+      } else if (trafficColor === 'GREEN') {
+        voiceQueueRef.current?.critical("Green light. Zebra crossing ahead. Safe to cross.");
+      } else if (trafficColor === 'YELLOW') {
+        voiceQueueRef.current?.warning("Yellow light detected. Prepare to stop.");
+      } else {
+        voiceQueueRef.current?.info("No traffic light detected. Look carefully before crossing.");
+      }
+    } else if (normalizedCmd.includes('what color is the light') || normalizedCmd.includes('light color') || normalizedCmd.includes('color of the light')) {
+      if (trafficColor !== '--') {
+        voiceQueueRef.current?.info(`The traffic light is currently ${trafficColor.toLowerCase()}.`);
+      } else {
+        voiceQueueRef.current?.info("No traffic light is detected currently.");
+      }
+    } else if (normalizedCmd.includes('is there a zebra crossing') || normalizedCmd.includes('zebra crossing') || normalizedCmd.includes('crossing')) {
+      if (zebraCrossingState !== 'NONE') {
+        voiceQueueRef.current?.info(`Yes, a zebra crossing is detected ${zebraCrossingState === 'AT_CROSSING' ? 'at your position' : 'ahead'}.`);
+      } else {
+        voiceQueueRef.current?.info("No zebra crossing detected currently.");
+      }
+    }
     // Context Info
     else if (normalizedCmd.includes('where am i') || normalizedCmd === 'location' || normalizedCmd.includes('coordinates')) {
       const activeLoc = simulatedLoc || currentCoords || [12.9716, 80.2454];
@@ -1061,12 +1526,23 @@ export default function Dashboard({ onExit }: DashboardProps) {
     } else if (normalizedCmd.includes('help') || normalizedCmd.includes('emergency') || normalizedCmd.includes('sos')) {
       handleSos();
     } else {
-      speakIfNotMuted(`Command: ${transcript}. Not recognized.`);
+      // It is a general question to ask Gemini!
+      // Do NOT speak anything here — it would re-trigger isSpeaking and block the recognition restart
+      try {
+        const answer = await askGemini(transcript, videoRef.current, settings.voice_lang);
+        if (answer) {
+          speakIfNotMuted(answer);
+          addHistory('gemini', transcript, null, answer.slice(0, 60));
+        }
+      } catch (err) {
+        console.warn("Error asking Gemini:", err);
+        speakIfNotMuted("Sorry, I could not reach the AI service at the moment.");
+      }
     }
   }, [
     currentCoords, settings, simulatedLoc, navActive, currentRoadName, batteryLevel,
     distanceRemaining, etaMinutes, routeCoords, routeSteps, navStep, cameraOn,
-    speakIfNotMuted, addHistory, startRouteNavigation, findNearestPlace, handleOCR, handleScene, handleColor, handleFace, handleSos, startCamera
+    speakIfNotMuted, addHistory, startRouteNavigation, findNearestPlace, handleOCR, handleScene, handleColor, handleFace, handleSos, startCamera, handleObjectDetection
   ]);
 
   // Continuous speech recognition controller with Wake Word
@@ -1191,9 +1667,8 @@ export default function Dashboard({ onExit }: DashboardProps) {
     }
     
     // Single prompt start
-    setListening(true);
-    speakIfNotMuted('Listening for command.');
-    setTimeout(() => {
+    speakIfNotMuted('Listening for command.', () => {
+      setListening(true);
       speechHelperRef.current?.start(
         (transcript) => {
           setListening(false);
@@ -1203,7 +1678,7 @@ export default function Dashboard({ onExit }: DashboardProps) {
           setListening(false);
         }
       );
-    }, 1500);
+    });
   }, [settings.voice_automation, speakIfNotMuted, processVoiceCommand]);
 
   // Keyboard shortcut listener effect
@@ -1450,10 +1925,11 @@ export default function Dashboard({ onExit }: DashboardProps) {
               <h3 className="font-semibold text-slate-700 mb-3 flex items-center gap-2">
                 <Brain className="w-5 h-5 text-primary-600" /> AI Features
               </h3>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-4 gap-2">
                 {[
                   { id: 'ocr', icon: Scan, label: 'Read Text', action: handleOCR },
                   { id: 'scene', icon: Eye, label: 'Describe', action: handleScene },
+                  { id: 'objects', icon: Target, label: 'Objects', action: handleObjectDetection },
                   { id: 'color', icon: Palette, label: 'Color', action: handleColor },
                   { id: 'currency', icon: DollarSign, label: 'Currency', action: handleCurrency },
                   { id: 'face', icon: ScanFace, label: 'Face', action: handleFace },
@@ -1835,6 +2311,150 @@ export default function Dashboard({ onExit }: DashboardProps) {
             </motion.div>
           )}
         </AnimatePresence>
+
+        {/* Scene Understanding Panel */}
+        <div className="max-w-[1600px] w-full mx-auto px-4 pb-8 space-y-4">
+          <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4 space-y-4">
+            {/* Top row status indicators */}
+            <div className="flex flex-wrap items-center gap-3 border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <Brain className="w-5 h-5 text-primary-600 animate-pulse" />
+                <h3 className="font-bold text-slate-800">Scene Understanding Panel</h3>
+              </div>
+              <div className="flex flex-wrap gap-2 md:ml-auto">
+                {/* Traffic light indicator */}
+                <span className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1.5 shadow-sm border ${
+                  trafficColor === 'RED' ? 'bg-error-500/10 text-error-600 border-error-200 animate-pulse' :
+                  trafficColor === 'GREEN' ? 'bg-success-500/10 text-success-600 border-success-200 animate-pulse' :
+                  trafficColor === 'YELLOW' ? 'bg-warning-500/10 text-warning-600 border-warning-200 animate-pulse' :
+                  'bg-slate-100 text-slate-400 border-slate-200'
+                }`}>
+                  <span className={`w-2.5 h-2.5 rounded-full ${
+                    trafficColor === 'RED' ? 'bg-error-500' :
+                    trafficColor === 'GREEN' ? 'bg-success-500' :
+                    trafficColor === 'YELLOW' ? 'bg-warning-500' :
+                    'bg-slate-300'
+                  }`} />
+                  {trafficColor !== '--' ? `${trafficColor} LIGHT` : 'NO TRAFFIC SIGNAL'}
+                </span>
+                
+                {/* Zebra Crossing status */}
+                {zebraCrossingState !== 'NONE' ? (
+                  <span className="px-3 py-1 rounded-full text-xs font-bold bg-primary-50 text-primary-600 border border-primary-200 shadow-sm flex items-center gap-1.5 animate-pulse">
+                    🦓 ZEBRA CROSSING DETECTED ({zebraCrossingState})
+                  </span>
+                ) : (
+                  <span className="px-3 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-400 border border-slate-200">
+                    🦓 NO CROSSING DETECTED
+                  </span>
+                )}
+
+                {/* Scene Active status indicator */}
+                <span className={`px-3 py-1 rounded-full text-xs font-bold border transition-all duration-300 flex items-center gap-1.5 ${
+                  sceneActivePulse ? 'bg-primary-600 text-white border-primary-700 shadow-md animate-bounce' : 'bg-slate-100 text-slate-500 border-slate-200'
+                }`}>
+                  👁 SCENE ACTIVE
+                </span>
+              </div>
+            </div>
+
+            {/* Middle row cards */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              {/* Card 1: Scene Description */}
+              <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 space-y-2 hover:shadow-md transition-shadow">
+                <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                  <Eye className="w-4 h-4 text-primary-600" /> Scene Description
+                </h4>
+                <p className="text-sm font-semibold text-slate-700 leading-relaxed min-h-[60px]">
+                  {sceneText || 'Awaiting periodic description (updates every 10 seconds)...'}
+                </p>
+              </div>
+
+              {/* Card 2: Last OCR Reading */}
+              <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 space-y-2 hover:shadow-md transition-shadow">
+                <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                  <Scan className="w-4 h-4 text-primary-600" /> Last OCR Reading
+                </h4>
+                <p className="text-sm font-bold text-slate-700 leading-relaxed min-h-[60px]">
+                  {ocrText ? ocrText : 'Scanning signs, bus routes, doors...'}
+                </p>
+              </div>
+
+              {/* Card 3: Traffic Light Status */}
+              <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 flex items-center gap-4 hover:shadow-md transition-shadow">
+                <div className="flex-shrink-0 flex items-center justify-center">
+                  <div className={`w-14 h-14 rounded-full border-4 flex items-center justify-center font-bold text-[10px] uppercase shadow-inner ${
+                    trafficColor === 'RED' ? 'bg-error-500 border-error-600 text-white animate-pulse' :
+                    trafficColor === 'GREEN' ? 'bg-success-500 border-success-600 text-white animate-pulse' :
+                    trafficColor === 'YELLOW' ? 'bg-warning-500 border-warning-600 text-white animate-pulse' :
+                    'bg-slate-200 border-slate-300 text-slate-400'
+                  }`}>
+                    {trafficColor}
+                  </div>
+                </div>
+                <div>
+                  <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Signal Details</h4>
+                  <p className="text-sm font-bold text-slate-700 mt-0.5">
+                    {trafficColor !== '--' ? (trafficConfirmed ? 'Confirmed' : 'Detecting...') : 'None Detected'}
+                  </p>
+                </div>
+              </div>
+
+              {/* Card 4: Zebra Crossing */}
+              <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 flex items-center gap-4 hover:shadow-md transition-shadow">
+                <div className={`w-14 h-14 rounded-xl border flex items-center justify-center flex-shrink-0 shadow-sm ${
+                  zebraCrossingState !== 'NONE' ? 'bg-primary-50 border-primary-200 text-primary-600 animate-pulse' : 'bg-slate-100 border-slate-200 text-slate-400'
+                }`}>
+                  <Glasses className="w-7 h-7" />
+                </div>
+                <div>
+                  <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Zebra Crossing</h4>
+                  <p className="text-sm font-bold text-slate-700 capitalize mt-0.5">
+                    {zebraCrossingState !== 'NONE' ? zebraCrossingState.toLowerCase().replace('_', ' ') : 'Clear'}
+                  </p>
+                  {vehicleOnCrossing && (
+                    <span className="text-[10px] text-error-600 font-bold block animate-bounce">Vehicle on crossing!</span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Bottom Bar: Voice Queue indicator */}
+            <div className="bg-slate-950 text-slate-300 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3 text-xs shadow-inner border border-slate-800">
+              <div className="flex items-center gap-2">
+                <Volume2 className="w-4 h-4 text-accent-400 animate-pulse" />
+                <span className="font-semibold">
+                  {voiceSpeaking ? (
+                    <>Speaking ({
+                      voicePriority === 1 ? 'CRITICAL' :
+                      voicePriority === 2 ? 'WARNING' :
+                      voicePriority === 3 ? 'INFO' : 'AMBIENT'
+                    }): <span className="text-white italic">"{voiceText}"</span></>
+                  ) : (
+                    'Voice assistant is idle.'
+                  )}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 ml-auto font-mono text-[11px]">
+                <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-400 font-bold">
+                  Queue size: {voiceQueueSize}
+                </span>
+                {voiceSpeaking && (
+                  <span className={`px-2 py-0.5 rounded font-bold text-[9px] ${
+                    voicePriority === 1 ? 'bg-error-500 text-white animate-pulse' :
+                    voicePriority === 2 ? 'bg-warning-500 text-slate-900' :
+                    voicePriority === 3 ? 'bg-primary-500 text-white' :
+                    'bg-slate-800 text-slate-300'
+                  }`}>
+                    {voicePriority === 1 ? 'CRITICAL' :
+                     voicePriority === 2 ? 'WARNING' :
+                     voicePriority === 3 ? 'INFO' : 'AMBIENT'}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Credit Footer */}

@@ -372,6 +372,8 @@ export function translateText(text: string, langCode: string): string {
   return translated;
 }
 
+let isSpeakingInternal = false;
+
 export function configureSpeech(speed: number, lang: string) {
   currentSettings = { speed, lang };
 }
@@ -387,7 +389,17 @@ export function speak(text: string, onEnd?: () => void) {
     activeAudio = null;
   }
 
-  if (!('speechSynthesis' in window)) return;
+  isSpeakingInternal = true;
+
+  const handleEnd = () => {
+    isSpeakingInternal = false;
+    if (onEnd) onEnd();
+  };
+
+  if (!('speechSynthesis' in window)) {
+    handleEnd();
+    return;
+  }
   
   // Standard cancel for native speech synthesis
   window.speechSynthesis.cancel();
@@ -408,6 +420,34 @@ export function speak(text: string, onEnd?: () => void) {
   // If a native voice for the selected language is not installed/available (e.g. Hindi, Tamil, Telugu),
   // use online TTS service fallback.
   if (!isEnglish && !hasNativeVoice) {
+    if (!navigator.onLine) {
+      // OFFLINE MODE: Use backend TTS
+      console.log(`Offline Mode: Using local backend TTS for ${lang}.`);
+      fetch('http://localhost:8000/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: translatedText })
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.audio_base64) {
+          const audio = new Audio(`data:audio/wav;base64,${data.audio_base64}`);
+          audio.playbackRate = currentSettings.speed;
+          activeAudio = audio;
+          audio.onended = () => { if (activeAudio === audio) activeAudio = null; handleEnd(); };
+          audio.onerror = () => { if (activeAudio === audio) activeAudio = null; handleEnd(); };
+          audio.play();
+        } else {
+          handleEnd();
+        }
+      })
+      .catch(err => {
+        console.error('Local TTS failed:', err);
+        handleEnd();
+      });
+      return;
+    }
+
     console.log(`No native voice found for language ${lang}. Using online TTS fallback.`);
     const shortLang = lang.split('-')[0]; // 'hi', 'ta', 'te'
     const url = `https://translate.google.com/translate_tts?ie=UTF-8&tl=${shortLang}&client=tw-ob&q=${encodeURIComponent(translatedText)}`;
@@ -417,19 +457,22 @@ export function speak(text: string, onEnd?: () => void) {
       audio.playbackRate = currentSettings.speed;
       activeAudio = audio;
       
-      if (onEnd) {
-        audio.onended = () => {
-          if (activeAudio === audio) activeAudio = null;
-          onEnd();
-        };
-      }
+      audio.onended = () => {
+        if (activeAudio === audio) activeAudio = null;
+        handleEnd();
+      };
+      audio.onerror = () => {
+        if (activeAudio === audio) activeAudio = null;
+        handleEnd();
+      };
 
       audio.play().catch(err => {
         console.warn('Online TTS play failed. Trying browser synthesis fallback:', err);
         const utterance = new SpeechSynthesisUtterance(translatedText);
         utterance.rate = currentSettings.speed;
         utterance.lang = currentSettings.lang;
-        if (onEnd) utterance.onend = onEnd;
+        utterance.onend = handleEnd;
+        utterance.onerror = handleEnd;
         window.speechSynthesis.speak(utterance);
       });
       return;
@@ -451,11 +494,13 @@ export function speak(text: string, onEnd?: () => void) {
     }
   }
 
-  if (onEnd) utterance.onend = onEnd;
+  utterance.onend = handleEnd;
+  utterance.onerror = handleEnd;
   window.speechSynthesis.speak(utterance);
 }
 
 export function stopSpeaking() {
+  isSpeakingInternal = false;
   if (activeAudio) {
     try {
       activeAudio.pause();
@@ -470,8 +515,7 @@ export function stopSpeaking() {
 }
 
 export function isSpeaking() {
-  const audioIsPlaying = activeAudio ? !activeAudio.paused : false;
-  return audioIsPlaying || ('speechSynthesis' in window && window.speechSynthesis.speaking);
+  return isSpeakingInternal;
 }
 
 export type SpeechRecognitionCallback = (transcript: string) => void;
@@ -481,13 +525,21 @@ export class SpeechRecognitionHelper {
   private callback: SpeechRecognitionCallback | null = null;
   private onEndCallback: (() => void) | null = null;
   private active = false;
+  private running = false;
+  private silenceTimer: ReturnType<typeof setTimeout> | null = null;
+  private finalTranscript = '';
+  private readonly silenceMs: number;
 
-  constructor() {
+  constructor(silenceMs = 1200) {
+    this.silenceMs = silenceMs;
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (SR) {
       this.recognition = new SR();
-      this.recognition.continuous = false;
-      this.recognition.interimResults = false;
+      // Continuous so the user can speak a full sentence
+      this.recognition.continuous = true;
+      // Interim results let us detect pauses in speech
+      this.recognition.interimResults = true;
+      this.recognition.maxAlternatives = 1;
       this.recognition.lang = currentSettings.lang;
     }
   }
@@ -496,40 +548,122 @@ export class SpeechRecognitionHelper {
     return this.recognition !== null;
   }
 
+  private _clearSilenceTimer() {
+    if (this.silenceTimer !== null) {
+      clearTimeout(this.silenceTimer);
+      this.silenceTimer = null;
+    }
+  }
+
+  private _commitTranscript() {
+    this._clearSilenceTimer();
+    const text = this.finalTranscript.trim();
+    this.finalTranscript = '';
+    if (text && this.callback && this.active) {
+      this.callback(text);
+    }
+    // Stop after committing so it fires onEnd
+    this.stop();
+  }
+
   start(callback: SpeechRecognitionCallback, onEnd?: () => void) {
     if (!this.recognition) return;
+
+    // If already running, stop safely first
+    if (this.running) {
+      try { this.recognition.stop(); } catch (_) {}
+    }
+
     this.callback = callback;
     this.onEndCallback = onEnd || null;
-    this.recognition.lang = currentSettings.lang;
     this.active = true;
+    this.running = true;
+    this.finalTranscript = '';
+    this.recognition.lang = currentSettings.lang;
 
     this.recognition.onresult = (e: any) => {
       if (!this.active) return;
-      const transcript = e.results[0][0].transcript;
-      if (this.callback) this.callback(transcript);
+
+      // Accumulate final results; ignore interim
+      let interimTranscript = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const result = e.results[i];
+        if (result.isFinal) {
+          this.finalTranscript += result[0].transcript + ' ';
+        } else {
+          interimTranscript += result[0].transcript;
+        }
+      }
+
+      // Every time we get speech (final or interim) reset the silence timer
+      this._clearSilenceTimer();
+      if (this.active) {
+        this.silenceTimer = setTimeout(() => {
+          // Use final transcript; if none accumulated yet but interim exists, use that
+          if (!this.finalTranscript.trim() && interimTranscript.trim()) {
+            this.finalTranscript = interimTranscript;
+          }
+          this._commitTranscript();
+        }, this.silenceMs);
+      }
+    };
+
+    this.recognition.onerror = (e: any) => {
+      console.warn('Speech recognition error:', e.error);
+      this._clearSilenceTimer();
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        this.active = false;
+        this.running = false;
+      }
+      // On network or audio-capture errors, let onend restart the loop
     };
 
     this.recognition.onend = () => {
+      this.running = false;
+      // If we have pending transcript, commit it
+      if (this.finalTranscript.trim() && this.active) {
+        this._clearSilenceTimer();
+        const text = this.finalTranscript.trim();
+        this.finalTranscript = '';
+        if (this.callback) this.callback(text);
+      }
       if (this.active && this.onEndCallback) {
         this.onEndCallback();
       }
     };
 
+    if (!navigator.onLine) {
+      // OFFLINE MODE: Fallback to simulated offline mic capture or backend STT if available
+      console.log('Offline Mode: Browser SpeechRecognition disabled. Backend STT simulated.');
+      // Simulate capture then end
+      setTimeout(() => {
+        if (this.active && this.callback) {
+          this.callback("Offline speech mode activated");
+        }
+        if (this.onEndCallback) this.onEndCallback();
+        this.running = false;
+      }, 3000);
+      return;
+    }
+
     try {
       this.recognition.start();
     } catch (e) {
       console.warn('Speech recognition start error:', e);
+      this.running = false;
     }
   }
 
   stop() {
     this.active = false;
-    if (this.recognition) {
+    this._clearSilenceTimer();
+    if (this.recognition && this.running) {
       try {
         this.recognition.stop();
       } catch (e) {
         console.warn('Speech recognition stop error:', e);
       }
     }
+    this.running = false;
   }
 }

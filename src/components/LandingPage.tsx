@@ -10,25 +10,32 @@ interface LandingPageProps {
 }
 
 const features = [
-  { icon: Scan, title: 'Object Detection', desc: 'Real-time identification of people, furniture, vehicles, and everyday objects with bounding boxes and confidence scores.' },
+  { icon: Scan, title: 'Object Detection', desc: 'Real-time identification of people, furniture, vehicles, and everyday objects with position and distance estimation.' },
   { icon: Volume2, title: 'OCR & Text Reading', desc: 'Reads books, medicine labels, notices, sign boards, and street names aloud using advanced text recognition.' },
-  { icon: Eye, title: 'Scene Description', desc: 'AI-powered descriptions of indoor and outdoor environments to provide spatial awareness and context.' },
+  { icon: Eye, title: 'Scene Description', desc: 'AI-powered descriptions of indoor and outdoor environments to provide full spatial awareness and context.' },
+  { icon: Brain, title: 'Gemini AI Assistant', desc: 'Ask anything — GK questions, current affairs, general knowledge — and get instant spoken answers powered by Google Gemini.' },
+  { icon: MapPin, title: 'GPS Voice Navigation', desc: 'Voice-activated turn-by-turn navigation to any destination in English and regional Indian languages (Hindi, Tamil, Telugu, Kannada).' },
   { icon: Users, title: 'Face Recognition', desc: 'Register and recognize familiar faces, announcing who is nearby for social confidence.' },
-  { icon: DollarSign, title: 'Currency Recognition', desc: 'Identifies Indian currency notes (₹10 to ₹2000) and announces the value instantly.' },
+  { icon: DollarSign, title: 'Currency Recognition', desc: 'Expert-level identification of all Indian currency notes (₹10 to ₹2000) with denomination-specific visual analysis.' },
   { icon: Palette, title: 'Color Recognition', desc: 'Detects and speaks colors of objects, clothing, and surroundings for independent dressing and shopping.' },
-  { icon: MapPin, title: 'Obstacle Detection', desc: 'Estimates obstacle distance using computer vision, warning about near, medium, and far hazards.' },
-  { icon: Mic, title: 'Voice Commands', desc: 'Hands-free control with natural language: "What is in front of me?", "Read this", "Describe scene".' },
+  { icon: Mic, title: 'Voice Commands', desc: 'Hands-free control with natural language in English and Indian regional languages. Wake word: "Hey Vision".' },
   { icon: Bell, title: 'Emergency Mode', desc: 'One-tap SOS button sends location and emergency messages to registered contacts instantly.' },
+  { icon: MapPin, title: 'Traffic & Zebra Crossing', desc: 'Real-time detection of traffic light colors and zebra crossings with audio safety alerts for road crossings.' },
+  { icon: Zap, title: 'Obstacle Warning', desc: 'Estimates obstacle distance using computer vision, giving immediate warnings about near, medium, and far hazards.' },
 ];
 
+
 const technologies = [
-  { icon: Brain, name: 'TensorFlow.js', desc: 'In-browser object detection with COCO-SSD model' },
-  { icon: Scan, name: 'Tesseract.js', desc: 'Client-side OCR for real-time text recognition' },
-  { icon: Camera, name: 'WebRTC', desc: 'Live webcam streaming as the glasses camera' },
-  { icon: Volume2, name: 'Web Speech API', desc: 'Text-to-speech output and voice command input' },
-  { icon: Database, name: 'Supabase', desc: 'Cloud database for detection history and settings' },
-  { icon: Cpu, name: 'Modular Architecture', desc: 'Ready for Raspberry Pi camera & sensor swap' },
+  { icon: Brain, name: 'Google Gemini 2.5 Flash', desc: 'Powers AI Q&A, scene understanding, OCR, and currency detection via OpenRouter' },
+  { icon: Scan, name: 'COCO-SSD / YOLO v8', desc: 'In-browser & server-side real-time object detection with distance estimation' },
+  { icon: Camera, name: 'WebRTC', desc: 'Live webcam streaming as the glasses camera with frame capture' },
+  { icon: Volume2, name: 'Web Speech API', desc: 'Continuous speech recognition with silence debounce + multilingual TTS output' },
+  { icon: MapPin, name: 'OpenStreetMap + OSRM', desc: 'Free open-source GPS navigation with walking route planning and turn-by-turn steps' },
+  { icon: Database, name: 'Supabase', desc: 'Cloud database for detection history, settings sync, and edge function AI calls' },
+  { icon: Cpu, name: 'FastAPI Python Backend', desc: 'Local server for YOLO, EasyOCR, traffic light CV, and Gemini Q&A fallback' },
+  { icon: Code2, name: 'Modular Architecture', desc: 'Ready for Raspberry Pi camera & sensor swap with no AI logic changes' },
 ];
+
 
 const benefits = [
   { icon: Shield, title: 'Independence', desc: 'Navigate daily life without constant assistance from others.' },
@@ -112,7 +119,7 @@ export default function LandingPage({ onStartDemo }: LandingPageProps) {
             </div>
             <div className="flex gap-8 mt-10">
               <div>
-                <div className="text-3xl font-bold text-primary-600">10+</div>
+                <div className="text-3xl font-bold text-primary-600">12+</div>
                 <div className="text-sm text-slate-500">AI Features</div>
               </div>
               <div>
@@ -120,8 +127,8 @@ export default function LandingPage({ onStartDemo }: LandingPageProps) {
                 <div className="text-sm text-slate-500">Object Classes</div>
               </div>
               <div>
-                <div className="text-3xl font-bold text-primary-600">Real-time</div>
-                <div className="text-sm text-slate-500">Detection</div>
+                <div className="text-3xl font-bold text-primary-600">8 langs</div>
+                <div className="text-sm text-slate-500">Voice Support</div>
               </div>
             </div>
           </motion.div>
@@ -144,12 +151,12 @@ export default function LandingPage({ onStartDemo }: LandingPageProps) {
                   </div>
                 </div>
                 <div className="space-y-3">
-                  {['Object Detection', 'Text Recognition', 'Scene Description', 'Voice Feedback'].map((item, i) => (
+                  {['Gemini AI Q&A', 'GPS Navigation', 'Currency Detection', 'Voice Commands', 'Object Detection', 'Scene Description'].map((item, i) => (
                     <motion.div
                       key={item}
                       initial={{ opacity: 0, x: -20 }}
                       animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: 0.4 + i * 0.15 }}
+                      transition={{ delay: 0.4 + i * 0.12 }}
                       className="flex items-center gap-3 p-3 rounded-xl bg-white/60"
                     >
                       <div className="w-8 h-8 rounded-lg bg-primary-100 flex items-center justify-center">
@@ -177,7 +184,7 @@ export default function LandingPage({ onStartDemo }: LandingPageProps) {
           >
             <h2 className="text-4xl font-bold mb-4">AI Features That Empower</h2>
             <p className="text-lg text-slate-600 max-w-2xl mx-auto">
-              Ten powerful AI capabilities running entirely in your browser, simulating the full smart glasses experience.
+              Twelve powerful AI capabilities — from Gemini-powered Q&A to GPS navigation — all accessible by voice.
             </p>
           </motion.div>
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">

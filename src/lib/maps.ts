@@ -31,6 +31,7 @@ export async function searchPlaces(
   longitude?: number
 ): Promise<MapLocation[]> {
   try {
+    if (!navigator.onLine) throw new Error('Offline mode: skipping network fetch');
     const baseUrl = 'https://nominatim.openstreetmap.org/search';
     const params = new URLSearchParams({
       q: query,
@@ -125,6 +126,7 @@ export async function getWalkingRoute(
   end: [number, number] // [lat, lon]
 ): Promise<RouteResult> {
   try {
+    if (!navigator.onLine) throw new Error('Offline mode: skipping network routing');
     const url = `https://router.projectosrm.org/route/v1/walking/${start[1]},${start[0]};${end[1]},${end[0]}?overview=full&geometries=geojson&steps=true`;
     
     const response = await fetch(url);

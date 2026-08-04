@@ -42,13 +42,16 @@ export interface VisionResult {
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
 
-export function captureFrame(video: HTMLVideoElement, maxWidth: number = 640): string {
+export function captureFrame(video: HTMLVideoElement | null, maxWidth: number = 640): string {
+  if (!video || video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
+    return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+  }
   const canvas = document.createElement('canvas');
   const scale = Math.min(1, maxWidth / (video.videoWidth || 640));
   canvas.width = (video.videoWidth || 640) * scale;
   canvas.height = (video.videoHeight || 480) * scale;
   const ctx = canvas.getContext('2d');
-  if (!ctx) return '';
+  if (!ctx) return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
   return canvas.toDataURL('image/jpeg', 0.7);
 }
@@ -62,7 +65,7 @@ interface RawObject {
 }
 
 export async function analyzeFrame(
-  video: HTMLVideoElement,
+  video: HTMLVideoElement | null,
   customPrompt?: string,
   targetLang?: string
 ): Promise<VisionResult> {
@@ -164,6 +167,7 @@ export async function analyzeFrame(
           };
         }
 
+        if (!video) throw new Error('Video element not active for local object detection');
         const model = await getLocalModel();
         const predictions = await model.detect(video);
         
@@ -210,10 +214,10 @@ export async function analyzeFrame(
         // Build heuristic scene description
         let scene = '';
         if (objects.length > 0) {
-          const names = objects.map((o) => o.class).join(', ');
-          scene = `Detected ${names} in front of you.`;
+          const descriptions = objects.map(o => `a ${o.class} on your ${o.position === 'center' ? 'front' : o.position}`);
+          scene = `I can see ${descriptions.join(', and ')}.`;
         } else {
-          scene = 'Clear path in front of you.';
+          scene = 'The path in front of you is clear.';
         }
 
         const nearObstacle = objects.find(o => o.distanceMeters <= 1.2);
@@ -386,9 +390,9 @@ export async function analyzeFrame(
 }
 
 export function generateVoiceMessage(obj: DetectedObject): string {
-  const posText = obj.position === 'center' ? 'in front of you' : `on your ${obj.position}`;
-  const distText = obj.distanceMeters <= 1 ? 'very close' : `${obj.distanceMeters} meters away`;
-  return `${obj.class} ${posText}, ${distText}.`;
+  const posText = obj.position === 'center' ? 'right in front of you' : `on your ${obj.position}`;
+  const distText = obj.distanceMeters <= 1 ? "and it's very close!" : `about ${obj.distanceMeters} meters away.`;
+  return `I see a ${obj.class} ${posText}, ${distText}`;
 }
 
 export function drawBoundingBoxes(
@@ -460,4 +464,79 @@ export function drawBoundingBoxes(
     ctx.fillStyle = '#ffffff';
     ctx.fillText(label, drawX + 5, drawY - 6);
   });
+}
+
+export async function askGemini(
+  question: string,
+  video: HTMLVideoElement | null,
+  targetLang?: string
+): Promise<string> {
+  // Build a prompt appropriate for voice assistant (concise, conversational, TTS-friendly)
+  const langInstruction = targetLang && !targetLang.toLowerCase().startsWith('en')
+    ? ` Respond in the user's language (${targetLang}).`
+    : '';
+  const prompt = `You are VisionAssist, an AI voice assistant embedded in smart glasses for visually impaired users. The user has asked: "${question}". Answer concisely in 1-3 sentences. Be direct, accurate, and friendly. Do not use markdown or bullet points — only plain sentences suitable for text-to-speech.${langInstruction}`;
+
+  // 1. Try Supabase Edge Function with text-only mode (no image required)
+  try {
+    const response = await fetch(`${SUPABASE_URL}/functions/v1/vision-analyze`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ prompt, lang: targetLang, textOnly: true }),
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      if (data.answer && data.answer.trim().length > 0) {
+        return data.answer.trim();
+      }
+    }
+  } catch (err) {
+    console.warn("Supabase text-only Gemini query failed, trying local python backend:", err);
+  }
+
+  // 2. Fallback to local python backend
+  try {
+    const response = await fetch('http://localhost:8000/api/ask-gemini', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        question,
+        lang: targetLang || 'en-US'
+      }),
+    });
+    if (response.ok) {
+      const data = await response.json();
+      if (data.answer) {
+        return data.answer;
+      }
+    }
+  } catch (err) {
+    console.warn("Local Gemini query failed:", err);
+  }
+
+  // 3. Offline fallback responses for common simple questions
+  const offlineResponses: Array<[RegExp, string | (() => string)]> = [
+    [/what time|current time|time now/i, () => `The current time is ${new Date().toLocaleTimeString()}.`],
+    [/what date|today('s)? date|current date/i, () => `Today is ${new Date().toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.`],
+    [/who are you|what are you|your name/i, "I am VisionAssist, your AI-powered smart glasses assistant."],
+    [/hello|hi there|hey/i, "Hello! How can I help you today?"],
+    [/help/i, "I can describe your surroundings, read text, detect objects, identify currency, and navigate you to a destination. Just ask!"],
+    [/weather/i, "I don't have access to live weather data right now. Please check your weather app for the current forecast."],
+    [/battery|power level/i, "I'm currently running on your smart glasses processor. Check the battery indicator on screen for current levels."],
+  ];
+
+  const lowerQ = question.toLowerCase();
+  for (const [pattern, response] of offlineResponses) {
+    if (pattern.test(lowerQ)) {
+      return typeof response === 'function' ? response() : response;
+    }
+  }
+
+  return `I heard your question: "${question}". I'm currently unable to connect to the AI service. Please check your internet connection and make sure your API key is configured.`;
 }
