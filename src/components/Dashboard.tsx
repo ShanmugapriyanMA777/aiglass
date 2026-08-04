@@ -5,7 +5,7 @@ import {
   Scan, Eye, Palette, DollarSign, MapPin, AlertTriangle,
   Navigation, Settings, BarChart3, Home, X, Download, Trash2,
   Play, Square, Clock, TrendingUp, Zap, Brain, Target,
-  CheckCircle2, AlertCircle, Loader2, ScanFace, RefreshCw, Shield, Glasses,
+  CheckCircle2, AlertCircle, Loader2, ScanFace, RefreshCw, Shield, Glasses, BrainCircuit
 } from 'lucide-react';
 
 const PRIORITY = {
@@ -89,7 +89,7 @@ class VoiceQueue {
   }
 }
 
-import { analyzeFrame, drawBoundingBoxes, getLocalModel, type VisionResult, askGemini, generateVoiceMessage } from '../lib/detection';
+import { analyzeFrame, drawBoundingBoxes, getLocalModel, type VisionResult, askGemini, generateVoiceMessage, detectCurrency, type CurrencyDetectionResult } from '../lib/detection';
 import { speak, stopSpeaking, configureSpeech, SpeechRecognitionHelper, isSpeaking } from '../lib/speech';
 import { supabase, type AppSettings, type EmergencyContact, type DetectionRecord, type ActivityLogEntry, type DetectionType } from '../lib/supabase';
 import MapPanel from './MapPanel';
@@ -161,13 +161,28 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         setVoiceText(text);
         setVoiceQueueSize(queueSize);
         setVoicePriority(priority);
+        if (active) {
+          setAiMood('Speaking');
+        } else if (aiMood === 'Speaking') {
+          setAiMood('Calm');
+        }
       }, 0);
     };
   }
 
   const [sceneText, setSceneText] = useState('');
   const [colorResult, setColorResult] = useState<{ name: string; hex: string } | null>(null);
-  const [currencyResult, setCurrencyResult] = useState('');
+  const [currencyModeActive, setCurrencyModeActive] = useState(false);
+  const [currencyData, setCurrencyData] = useState<CurrencyDetectionResult | null>(null);
+  const [currencyHistory, setCurrencyHistory] = useState<Array<{time: string, text: string, conf: number}>>([]);
+  const lastSpokenCurrency = useRef<string>('');
+  const currencyIntervalRef = useRef<number>(0);
+  
+  // AI Companion States
+  const [aiHistory, setAiHistory] = useState<Array<{role: string, content: string}>>([]);
+  const [lastInteractionTime, setLastInteractionTime] = useState<number>(Date.now());
+  const [aiMood, setAiMood] = useState<'Calm' | 'Alert' | 'Thinking' | 'Speaking'>('Calm');
+  const [aiConfidence, setAiConfidence] = useState<number>(100);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [voiceMessage, setVoiceMessage] = useState('');
   const [settings, setSettings] = useState<AppSettings & { 
@@ -175,6 +190,8 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     home_address?: string;
     college_address?: string;
     favorite_place?: string;
+    assistant_name?: string;
+    proactive_mode?: boolean;
   }>({
     voice_speed: 1.0,
     voice_lang: 'en-US',
@@ -186,7 +203,9 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     voice_automation: false,
     home_address: '',
     college_address: '',
-    favorite_place: ''
+    favorite_place: '',
+    assistant_name: 'Vision',
+    proactive_mode: true
   });
   const [contacts, setContacts] = useState<EmergencyContact[]>([]);
   const [registeredFaces, setRegisteredFaces] = useState<string[]>([]);
@@ -625,7 +644,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       }
       setCameraOn(true);
       setCameraStatus('on');
-      speakIfNotMuted('Camera started. Analyzing surroundings.');
+      speakIfNotMuted('My camera is on! I am taking a look around for you.');
 
       // Start periodic high-level cloud analysis (runs every 8 seconds for scene details)
       const analyzeCloud = async () => {
@@ -690,7 +709,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
   const startRouteNavigation = useCallback(async (destinationName: string) => {
     if (!destinationName) return;
     setError('');
-    speakIfNotMuted(`Searching walking route to ${destinationName}`);
+    speakIfNotMuted(`Got it. I'm finding the best walking route to ${destinationName} for you.`);
     addHistory('navigation', destinationName, null, 'Searching route');
     
     try {
@@ -721,7 +740,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       setCurrentRoadName(route.steps[0]?.instruction || 'Start walking');
       
       const firstInstruction = route.steps[0]?.instruction || 'Walk forward';
-      speakIfNotMuted(`Navigation started. ${firstInstruction}`);
+      speakIfNotMuted(`We are ready to go! ${firstInstruction}`);
       addHistory('navigation', destination.name.split(',')[0], null, 'Active');
     } catch (err) {
       console.error('Failed to plan navigation route:', err);
@@ -798,7 +817,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         setSimulatedLoc(null);
         setIsSimulatingWalk(false);
         setSpeedMps(0);
-        speakIfNotMuted('You have reached your destination.');
+        speakIfNotMuted('Great job, we have safely reached your destination!');
         addHistory('navigation', navDestination, null, 'Arrived');
         return;
       }
@@ -844,7 +863,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         clearInterval(timer);
         setIsSimulatingWalk(false);
         setSpeedMps(0);
-        speakIfNotMuted("You are off route. Calculating a better path.");
+        speakIfNotMuted("It looks like we took a slight detour. Let me calculate a new path for us.");
         setTimeout(() => {
           startRouteNavigation(navDestination);
         }, 2000);
@@ -860,9 +879,9 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     setActiveFeature('ocr');
     setAnalyzing(true);
     setError('');
-    speakIfNotMuted('Reading text.');
+    speakIfNotMuted('Let me read that for you.');
     try {
-      const result = await analyzeFrame(videoRef.current, 'Read all text visible in this image. Respond with a JSON object: {"text": "all readable text", "objects": [], "scene": "", "colors": [], "currency": "", "warning": ""}. If no text is visible, return empty string for text.', settings.voice_lang);
+      const result = await analyzeFrame(videoRef.current, 'Read all text visible in this image and summarize it naturally. For example: "This appears to be a medicine label. The medicine is Paracetamol 500 mg. The expiry date is December 2027." Respond with a JSON object: {"text": "the natural summary", "objects": [], "scene": "", "colors": [], "currency": "", "warning": ""}. If no text is visible, return empty string for text.', settings.voice_lang);
       setOcrText(result.text);
       if (result.text) {
         speakIfNotMuted(result.text.slice(0, 200));
@@ -919,48 +938,57 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
   }, [speakIfNotMuted, addHistory]);
 
   // Currency recognition
-  const handleCurrency = useCallback(async () => {
-    if (!videoRef.current || !streamRef.current) return;
-    setActiveFeature('currency');
-    setAnalyzing(true);
-    setError('');
-    speakIfNotMuted('Scanning for currency note.');
-    const currencyPrompt = `You are an expert Indian Rupee currency recognition system. Carefully examine this image for any Indian Rupee banknote.
-
-Identification guide:
-- ₹10 note: Chocolate brown / orange-brown color. Has the Konark Sun Temple on reverse.
-- ₹20 note: Greenish yellow. Has Ellora Caves on reverse. Has a windmill/scalloped edge on the left.
-- ₹50 note: Fluorescent blue. Has Hampi with chariot on reverse.
-- ₹100 note: Lavender / purple. Has Rani ki Vav (stepwell) on reverse.
-- ₹200 note: Bright yellow. Has Sanchi Stupa on reverse.
-- ₹500 note: Stone grey / slate grey. Has Red Fort on reverse. Has a large '500' in green on front-right.
-- ₹2000 note: Magenta / pink-red. Has Mangalyaan (Mars Orbiter) on reverse. Most commonly a pink colored large note.
-
-All notes feature: Mahatma Gandhi portrait on the right, Reserve Bank of India seal, Ashoka Pillar, the ₹ symbol, and denomination in numerals. Newer notes (post-2016) have a security strip and micro-lettering.
-
-Inspect the image now:
-1. Is a currency note visible?
-2. What denomination is it based on its color, size, and printed features?
-3. State your confidence level.
-
-Respond ONLY with this JSON (no markdown, no explanation outside JSON):
-{"currency": "denomination like '500 rupees' or '₹500 note' or empty string if no note visible", "objects": [], "scene": "", "text": "", "colors": [], "warning": ""}`;
-    try {
-      const result = await analyzeFrame(videoRef.current, currencyPrompt, settings.voice_lang);
-      setCurrencyResult(result.currency);
-      if (result.currency) {
-        speakIfNotMuted(`Detected: ${result.currency}.`);
-        addHistory('currency', result.currency, null, 'Currency detected');
-      } else {
-        speakIfNotMuted('No currency note detected. Please hold the note clearly in front of the camera in good lighting.');
-      }
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      setError(errMsg);
-      speakIfNotMuted('Currency recognition failed.');
+  // Currency recognition toggle
+  const handleCurrency = useCallback(() => {
+    if (!videoRef.current || !streamRef.current) {
+      speakIfNotMuted("Please start the camera first.");
+      return;
     }
-    setAnalyzing(false);
-  }, [speakIfNotMuted, addHistory]);
+    if (currencyModeActive) {
+      setCurrencyModeActive(false);
+      setActiveFeature('');
+      speakIfNotMuted('Stopped currency scanning.');
+    } else {
+      setCurrencyModeActive(true);
+      setActiveFeature('currency');
+      speakIfNotMuted('I am ready to check your currency! Just hold a note or coin up to the camera for me.');
+      lastSpokenCurrency.current = '';
+    }
+  }, [currencyModeActive, speakIfNotMuted]);
+
+  useEffect(() => {
+    if (!currencyModeActive || !videoRef.current) {
+      if (currencyIntervalRef.current) window.clearInterval(currencyIntervalRef.current);
+      return;
+    }
+    
+    currencyIntervalRef.current = window.setInterval(async () => {
+      if (!videoRef.current) return;
+      const result = await detectCurrency(videoRef.current);
+      setCurrencyData(result);
+      
+      if (result.detected && result.currency) {
+        // Smart Detection
+        if (result.currency !== lastSpokenCurrency.current) {
+          lastSpokenCurrency.current = result.currency;
+          voiceQueueRef.current?.info(`This is a ${result.value_text || result.currency}`);
+          
+          setCurrencyHistory(prev => [{
+            time: new Date().toLocaleTimeString(),
+            text: result.currency,
+            conf: result.confidence
+          }, ...prev].slice(0, 10));
+          
+          addHistory('currency', result.currency, result.confidence, 'Currency detected');
+        }
+      } else if (!result.detected) {
+        // Reset last spoken if no currency is seen, so it re-announces if shown again
+        lastSpokenCurrency.current = '';
+      }
+    }, 800);
+    
+    return () => window.clearInterval(currencyIntervalRef.current);
+  }, [currencyModeActive, addHistory]);
 
   // Face recognition
   const handleFace = useCallback(async () => {
@@ -993,7 +1021,7 @@ Respond ONLY with this JSON (no markdown, no explanation outside JSON):
     setActiveFeature('objects');
     setAnalyzing(true);
     setError('');
-    speakIfNotMuted('Detecting objects.');
+    speakIfNotMuted('Let me see what objects are around us.');
     try {
       const result = await analyzeFrame(
         videoRef.current,
@@ -1079,6 +1107,29 @@ Respond ONLY with this JSON (no markdown, no explanation outside JSON):
       }
     );
   }, [speakIfNotMuted]);
+
+  // Fall Detection
+  const handleFallDetection = useCallback(() => {
+    speakIfNotMuted('It looks like you may have fallen. Are you okay?', () => {
+      // Wait for response
+      setListening(true);
+      if (speechHelperRef.current) {
+        speechHelperRef.current.start((transcript) => {
+          setListening(false);
+          const cmd = transcript.trim().toLowerCase();
+          if (cmd.includes('yes') || cmd.includes('okay') || cmd.includes('fine')) {
+            speakIfNotMuted('Glad to hear you are okay. Let me know if you need anything.');
+          } else {
+            handleSos();
+          }
+        }, () => {
+          // No response
+          setListening(false);
+          handleSos();
+        });
+      }
+    });
+  }, [speakIfNotMuted, handleSos]);
 
   // Obstacle alerts tracking helper
   const processObstacleAlerts = useCallback((objects: any[]) => {
@@ -1508,7 +1559,7 @@ Respond ONLY with this JSON (no markdown, no explanation outside JSON):
       speakIfNotMuted(`Smart Glasses battery is at ${batteryLevel} percent, operating normally.`);
     } else if (normalizedCmd.includes('what') && normalizedCmd.includes('front')) {
       handleScene();
-    } else if (normalizedCmd.includes('read') || normalizedCmd.includes('ocr') || normalizedCmd.includes('text')) {
+    } else if (normalizedCmd.includes('read') || normalizedCmd.includes('ocr') || normalizedCmd.includes('text') || normalizedCmd.includes('what does it say')) {
       handleOCR();
     } else if (normalizedCmd.includes('describe') || normalizedCmd.includes('scene') || normalizedCmd.includes('surroundings')) {
       handleScene();
@@ -1519,31 +1570,61 @@ Respond ONLY with this JSON (no markdown, no explanation outside JSON):
     } else if (normalizedCmd.includes('face') || normalizedCmd.includes('person') || normalizedCmd.includes('who')) {
       handleFace();
     } else if (normalizedCmd.includes('stop')) {
+      if (currencyModeActive) setCurrencyModeActive(false);
       stopSpeaking();
       setVoiceMessage('');
     } else if (normalizedCmd.includes('start') && normalizedCmd.includes('camera')) {
       if (!cameraOn) startCamera();
     } else if (normalizedCmd.includes('help') || normalizedCmd.includes('emergency') || normalizedCmd.includes('sos')) {
       handleSos();
+    } else if (normalizedCmd.includes('fall') || normalizedCmd.includes('fell')) {
+      handleFallDetection();
     } else {
       // It is a general question to ask Gemini!
       // Do NOT speak anything here — it would re-trigger isSpeaking and block the recognition restart
       try {
-        const answer = await askGemini(transcript, videoRef.current, settings.voice_lang);
+        setAiMood('Thinking');
+        const userCtx = `Home: ${settings.home_address}, College: ${settings.college_address}`;
+        const answer = await askGemini(transcript, videoRef.current, settings.voice_lang, aiHistory, settings.assistant_name || 'Vision', userCtx);
         if (answer) {
           speakIfNotMuted(answer);
           addHistory('gemini', transcript, null, answer.slice(0, 60));
+          setAiHistory(prev => [...prev, {role: 'user', content: transcript}, {role: 'model', content: answer}].slice(-10));
         }
+        setAiMood('Calm');
       } catch (err) {
         console.warn("Error asking Gemini:", err);
         speakIfNotMuted("Sorry, I could not reach the AI service at the moment.");
+        setAiMood('Calm');
       }
     }
+    
+    // Update interaction time
+    setLastInteractionTime(Date.now());
   }, [
     currentCoords, settings, simulatedLoc, navActive, currentRoadName, batteryLevel,
     distanceRemaining, etaMinutes, routeCoords, routeSteps, navStep, cameraOn,
-    speakIfNotMuted, addHistory, startRouteNavigation, findNearestPlace, handleOCR, handleScene, handleColor, handleFace, handleSos, startCamera, handleObjectDetection
+    speakIfNotMuted, addHistory, startRouteNavigation, findNearestPlace, handleOCR, handleScene, handleColor, handleFace, handleSos, startCamera, handleObjectDetection,
+    currencyModeActive, handleCurrency, aiHistory, activeFeature
   ]);
+
+  // Proactive Assistance Mode
+  useEffect(() => {
+    if (!settings.proactive_mode || analyzing || voiceSpeaking) return;
+    
+    const interval = window.setInterval(() => {
+      const idleTime = Date.now() - lastInteractionTime;
+      if (idleTime > 60000) { // 60 seconds
+        // Only trigger occasionally
+        if (Math.random() < 0.3) {
+           speakIfNotMuted(`I'm still here ${settings.assistant_name ? `as ${settings.assistant_name}` : ''}, let me know if you need anything.`);
+           setLastInteractionTime(Date.now());
+        }
+      }
+    }, 15000); // Check every 15s
+    
+    return () => window.clearInterval(interval);
+  }, [settings.proactive_mode, settings.assistant_name, lastInteractionTime, analyzing, voiceSpeaking, speakIfNotMuted]);
 
   // Continuous speech recognition controller with Wake Word
   const startContinuousListening = useCallback(() => {
@@ -1567,7 +1648,7 @@ Respond ONLY with this JSON (no markdown, no explanation outside JSON):
           if (afterWake.length > 0) {
             processVoiceCommand(afterWake);
           } else {
-            speakIfNotMuted("Yes, how can I help you?");
+            speakIfNotMuted("I'm listening, how can I help you?");
             awaitingCommandRef.current = true;
             if (commandTimeoutRef.current) clearTimeout(commandTimeoutRef.current);
             commandTimeoutRef.current = window.setTimeout(() => {
@@ -1667,7 +1748,7 @@ Respond ONLY with this JSON (no markdown, no explanation outside JSON):
     }
     
     // Single prompt start
-    speakIfNotMuted('Listening for command.', () => {
+    speakIfNotMuted("I'm listening.", () => {
       setListening(true);
       speechHelperRef.current?.start(
         (transcript) => {
@@ -1798,6 +1879,59 @@ Respond ONLY with this JSON (no markdown, no explanation outside JSON):
             </div>
           </div>
         )}
+
+        <div className="max-w-[1600px] mx-auto px-4 pt-4 pb-2">
+          {/* AI Status Bar */}
+          <div className="bg-white/80 backdrop-blur rounded-2xl p-3 border border-slate-200/60 card-shadow flex items-center gap-6 overflow-x-auto">
+            <div className="flex items-center gap-2 border-r border-slate-200 pr-4">
+              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary-500 to-indigo-500 flex items-center justify-center text-white">
+                <BrainCircuit className="w-4 h-4" />
+              </div>
+              <div className="flex flex-col">
+                <span className="text-xs text-slate-500 font-medium">Assistant</span>
+                <span className="text-sm font-bold text-slate-800">{settings.assistant_name || 'Vision'}</span>
+              </div>
+            </div>
+            
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-500 font-medium">Mood:</span>
+              <span className={`text-sm font-semibold px-2 py-0.5 rounded-full ${aiMood === 'Calm' ? 'bg-blue-50 text-blue-600' : aiMood === 'Thinking' ? 'bg-purple-50 text-purple-600 animate-pulse' : 'bg-green-50 text-green-600'}`}>
+                {aiMood === 'Calm' ? '😊 Calm' : aiMood === 'Thinking' ? '🤔 Thinking' : '🗣️ Speaking'}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-500 font-medium">Listening:</span>
+              <span className={`text-sm font-semibold px-2 py-0.5 rounded-full ${listening ? 'bg-success-50 text-success-600 animate-pulse' : 'bg-slate-100 text-slate-600'}`}>
+                {listening ? '🟢 Active' : '⚪ Standby'}
+              </span>
+            </div>
+            
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-500 font-medium">Memory:</span>
+              <span className="text-sm font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
+                {aiHistory.length} items
+              </span>
+            </div>
+            
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-500 font-medium">Confidence:</span>
+              <div className="w-20 h-2 bg-slate-100 rounded-full overflow-hidden">
+                <div className="h-full bg-success-500 rounded-full transition-all" style={{ width: `${aiConfidence}%` }}></div>
+              </div>
+              <span className="text-xs font-bold text-slate-700">{aiConfidence}%</span>
+            </div>
+
+            {navActive && (
+              <div className="flex items-center gap-2 border-l border-slate-200 pl-4 ml-auto">
+                <span className="text-xs text-slate-500 font-medium">Navigation:</span>
+                <span className="text-sm font-semibold px-2 py-0.5 rounded-full bg-primary-50 text-primary-600 animate-pulse">
+                  Active ({Math.round(distanceRemaining)}m)
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
 
         <div className="max-w-[1600px] mx-auto p-4 grid grid-cols-1 lg:grid-cols-12 gap-4">
           {/* Left: Webcam & Emergency SOS controls */}
@@ -2121,31 +2255,71 @@ Respond ONLY with this JSON (no markdown, no explanation outside JSON):
               </div>
             )}
 
-            {/* Color & Currency Results */}
-            {(colorResult || currencyResult) && (
+            {/* Color Result */}
+            {colorResult && (
               <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4 space-y-3">
-                {colorResult && (
-                  <div>
-                    <h3 className="font-semibold text-slate-700 mb-2 flex items-center gap-2">
-                      <Palette className="w-5 h-5 text-primary-600" /> Color
-                    </h3>
-                    <div className="flex items-center gap-3">
-                      <div className="w-12 h-12 rounded-xl border-2 border-slate-200" style={{ backgroundColor: colorResult.hex }} />
-                      <div>
-                        <div className="font-semibold text-slate-700">{colorResult.name}</div>
-                        <div className="text-xs text-slate-500 font-mono">{colorResult.hex}</div>
-                      </div>
+                <div>
+                  <h3 className="font-semibold text-slate-700 mb-2 flex items-center gap-2">
+                    <Palette className="w-5 h-5 text-primary-600" /> Color
+                  </h3>
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-xl border-2 border-slate-200" style={{ backgroundColor: colorResult.hex }} />
+                    <div>
+                      <div className="font-semibold text-slate-700">{colorResult.name}</div>
+                      <div className="text-xs text-slate-500 font-mono">{colorResult.hex}</div>
                     </div>
                   </div>
-                )}
-                {currencyResult && (
-                  <div>
-                    <h3 className="font-semibold text-slate-700 mb-2 flex items-center gap-2">
-                      <DollarSign className="w-5 h-5 text-primary-600" /> Currency
-                    </h3>
-                    <div className="font-semibold text-slate-700">{currencyResult}</div>
+                </div>
+              </div>
+            )}
+
+            {/* AI Currency Recognition Module Card */}
+            {currencyModeActive && (
+              <div className="bg-white rounded-2xl card-shadow border-2 border-primary-500 overflow-hidden relative">
+                <div className="bg-primary-500 text-white p-3 flex justify-between items-center">
+                  <h3 className="font-bold flex items-center gap-2">
+                    <DollarSign className="w-5 h-5 animate-pulse" /> Currency Scanner Active
+                  </h3>
+                  <button onClick={() => { setCurrencyModeActive(false); setActiveFeature(''); }} className="text-white hover:text-red-200">
+                    <Square className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="p-4 space-y-4">
+                  <div className="flex justify-between items-center bg-slate-50 rounded-xl p-3 border border-slate-200">
+                    <div>
+                      <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wide">Detection Status</p>
+                      <p className={`font-semibold ${currencyData?.detected ? 'text-success-600' : 'text-slate-700'}`}>
+                        {currencyData?.detected ? currencyData.currency : "Waiting for currency..."}
+                      </p>
+                    </div>
+                    {currencyData?.detected && (
+                      <div className="text-right">
+                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wide">Confidence</p>
+                        <p className="font-bold text-slate-700">{(currencyData.confidence * 100).toFixed(1)}%</p>
+                      </div>
+                    )}
                   </div>
-                )}
+                  
+                  {currencyHistory.length > 0 && (
+                    <div>
+                      <div className="flex justify-between items-center mb-2">
+                         <h4 className="text-xs font-bold text-slate-600 uppercase tracking-wide">Recent Detections</h4>
+                         <button onClick={() => setCurrencyHistory([])} className="text-[10px] text-primary-600 font-semibold hover:underline">Clear</button>
+                      </div>
+                      <div className="space-y-1.5 max-h-32 overflow-y-auto pr-1">
+                        {currencyHistory.map((h, i) => (
+                          <div key={i} className="flex justify-between text-xs bg-slate-50 p-2 rounded-lg border border-slate-100">
+                            <span className="font-medium text-slate-700">{h.text}</span>
+                            <div className="flex gap-2 text-slate-500">
+                              <span>{(h.conf * 100).toFixed(0)}%</span>
+                              <span>{h.time}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>

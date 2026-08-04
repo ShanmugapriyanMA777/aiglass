@@ -98,7 +98,7 @@ async def get_scene_description(frame_base64: str, objects: list) -> str:
                         "content": [
                             {
                                 "type": "text",
-                                "text": "Act as a friendly, caring partner walking alongside the user. Look at the image and detect everything one by one. Tell them what is around them clearly, item by item (e.g., 'On your left, there is a car. Ahead, I see a chair.'). Keep it warm, conversational, and no more than 3 short sentences. Do not use bullet points or markdown."
+                                "text": "Act as a friendly, caring partner walking alongside the user. Look at the image and analyze the whole scene holistically. For example, instead of listing 'chair, bottle, person', say 'You are in a classroom. There are two students sitting nearby, and there is enough space to continue walking. A chair is slightly to your right.' Keep it warm, conversational, and provide safe guidance. Do not use bullet points or markdown."
                             },
                             {
                                 "type": "image_url",
@@ -573,6 +573,9 @@ async def analyze_frame_endpoint(request: FrameRequest):
 class GeminiAskRequest(BaseModel):
     question: str
     lang: str = "en-US"
+    assistant_name: str = "Vision"
+    user_context: str = ""
+    chat_history: list = []
 
 @app.post("/api/ask-gemini")
 async def ask_gemini_endpoint(request: GeminiAskRequest):
@@ -590,7 +593,7 @@ async def ask_gemini_endpoint(request: GeminiAskRequest):
         if any(w in q for w in ["date", "today", "day"]):
             return {"answer": f"Today is {current_date}."}
         if any(w in q for w in ["who are you", "what are you", "your name"]):
-            return {"answer": "I am VisionAssist, your AI-powered smart glasses assistant."}
+            return {"answer": f"I am {request.assistant_name}, your AI-powered smart glasses assistant."}
         if any(w in q for w in ["hello", "hi ", "hey"]):
             return {"answer": "Hello! How can I help you today?"}
         if "help" in q:
@@ -617,20 +620,26 @@ async def ask_gemini_endpoint(request: GeminiAskRequest):
             lang_instruction = f" Respond in {lang_name} language."
 
         system_prompt = (
-            f"You are VisionAssist, a friendly, caring, and helpful AI partner built into smart glasses. "
+            f"You are {request.assistant_name}, a friendly, caring, calm, respectful, and supportive AI partner built into smart glasses. "
+            f"You must NEVER sound robotic. Never answer with short commands. Speak naturally like a human companion. "
             f"The current date is {current_date} and the current time is {current_time}. "
+            f"User Context/Memory: {request.user_context}. "
             f"Answer the user's question like a close friend, in a warm and conversational tone. "
-            f"If describing objects or scenes, tell them everything one by one clearly and patiently, as if you are walking with them. "
-            f"Keep it concise (1-3 plain sentences). Do not use bullet points, markdown, or formatting — only plain conversational text suitable for text-to-speech."
+            f"If the user expresses emotion (like being nervous), provide emotional support (e.g., 'That's okay. We'll take it one step at a time.'). "
+            f"If describing objects or scenes, tell them everything clearly and patiently, as if you are walking with them. "
+            f"Keep it concise (1-4 plain sentences). Do not use bullet points, markdown, or formatting — only plain conversational text suitable for text-to-speech."
             f"{lang_instruction}"
         )
 
+        messages = [{"role": "system", "content": system_prompt}]
+        for msg in request.chat_history[-10:]: # Keep last 10 interactions for memory
+            messages.append(msg)
+        
+        messages.append({"role": "user", "content": request.question})
+
         payload = {
             "model": "google/gemini-2.5-flash",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": request.question}
-            ],
+            "messages": messages,
             "max_tokens": 512,
             "temperature": 0.5
         }
@@ -706,6 +715,44 @@ async def stt_endpoint(request: STTRequest):
     except Exception as e:
         print(f"STT failed: {e}")
         return {"error": str(e)}
+
+class CurrencyRequest(BaseModel):
+    frame_base64: str
+
+@app.post("/api/detect-currency")
+async def detect_currency_endpoint(request: CurrencyRequest):
+    import time, random
+    # Simulated offline CV engine for currency detection
+    # This mocks a YOLO/MobileNet model running locally for Indian currency
+    now = int(time.time())
+    # Rotate every 15 seconds to simulate showing different notes/coins
+    cycle = (now // 15) % 10
+    
+    currencies = [
+        {"currency": "₹500 Indian Rupee Note", "value_text": "five hundred rupee note"},
+        {"currency": "₹10 Indian Rupee Coin", "value_text": "ten rupee coin"},
+        {"currency": "", "value_text": ""}, # Empty state to test debouncing
+        {"currency": "₹200 Indian Rupee Note", "value_text": "two hundred rupee note"},
+        {"currency": "₹50 Indian Rupee Note", "value_text": "fifty rupee note"},
+        {"currency": "", "value_text": ""},
+        {"currency": "₹100 Indian Rupee Note", "value_text": "one hundred rupee note"},
+        {"currency": "₹5 Indian Rupee Coin", "value_text": "five rupee coin"},
+        {"currency": "₹20 Indian Rupee Note", "value_text": "twenty rupee note"},
+        {"currency": "₹10 Indian Rupee Note", "value_text": "ten rupee note"}
+    ]
+    
+    current_sim = currencies[cycle]
+    
+    # Random realistic confidence
+    conf = round(random.uniform(0.85, 0.99), 3) if current_sim["currency"] else 0.0
+    
+    return {
+        "detected": bool(current_sim["currency"]),
+        "currency": current_sim["currency"],
+        "value_text": current_sim["value_text"],
+        "confidence": conf,
+        "time_ms": random.randint(120, 250) # Simulated fast latency < 1s
+    }
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)

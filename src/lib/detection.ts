@@ -42,6 +42,33 @@ export interface VisionResult {
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
 
+export interface CurrencyDetectionResult {
+  detected: boolean;
+  currency: string;
+  value_text: string;
+  confidence: number;
+  time_ms: number;
+}
+
+export async function detectCurrency(video: HTMLVideoElement | null): Promise<CurrencyDetectionResult> {
+  if (!video) return { detected: false, currency: '', value_text: '', confidence: 0, time_ms: 0 };
+  const base64 = captureFrame(video);
+  const cleanBase64 = base64.replace(/^data:image\/(png|jpeg);base64,/, '');
+  try {
+    const res = await fetch('http://localhost:8000/api/detect-currency', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ frame_base64: cleanBase64 })
+    });
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (e) {
+    console.error('Currency detection error:', e);
+  }
+  return { detected: false, currency: '', value_text: '', confidence: 0, time_ms: 0 };
+}
+
 export function captureFrame(video: HTMLVideoElement | null, maxWidth: number = 640): string {
   if (!video || video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
     return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
@@ -469,13 +496,16 @@ export function drawBoundingBoxes(
 export async function askGemini(
   question: string,
   video: HTMLVideoElement | null,
-  targetLang?: string
+  targetLang?: string,
+  chatHistory: Array<{role: string, content: string}> = [],
+  assistantName: string = "Vision",
+  userContext: string = ""
 ): Promise<string> {
   // Build a prompt appropriate for voice assistant (concise, conversational, TTS-friendly)
   const langInstruction = targetLang && !targetLang.toLowerCase().startsWith('en')
     ? ` Respond in the user's language (${targetLang}).`
     : '';
-  const prompt = `You are VisionAssist, an AI voice assistant embedded in smart glasses for visually impaired users. The user has asked: "${question}". Answer concisely in 1-3 sentences. Be direct, accurate, and friendly. Do not use markdown or bullet points — only plain sentences suitable for text-to-speech.${langInstruction}`;
+  const prompt = `You are ${assistantName}, a friendly, caring AI voice assistant embedded in smart glasses. The user has asked: "${question}". Answer concisely in 1-3 sentences. Be direct, accurate, and warm. Do not use markdown or bullet points — only plain sentences suitable for text-to-speech.${langInstruction}`;
 
   // 1. Try Supabase Edge Function with text-only mode (no image required)
   try {
@@ -507,7 +537,10 @@ export async function askGemini(
       },
       body: JSON.stringify({
         question,
-        lang: targetLang || 'en-US'
+        lang: targetLang || 'en-US',
+        assistant_name: assistantName,
+        user_context: userContext,
+        chat_history: chatHistory
       }),
     });
     if (response.ok) {
@@ -524,7 +557,7 @@ export async function askGemini(
   const offlineResponses: Array<[RegExp, string | (() => string)]> = [
     [/what time|current time|time now/i, () => `The current time is ${new Date().toLocaleTimeString()}.`],
     [/what date|today('s)? date|current date/i, () => `Today is ${new Date().toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.`],
-    [/who are you|what are you|your name/i, "I am VisionAssist, your AI-powered smart glasses assistant."],
+    [/who are you|what are you|your name/i, `I am ${assistantName}, your AI-powered smart glasses assistant.`],
     [/hello|hi there|hey/i, "Hello! How can I help you today?"],
     [/help/i, "I can describe your surroundings, read text, detect objects, identify currency, and navigate you to a destination. Just ask!"],
     [/weather/i, "I don't have access to live weather data right now. Please check your weather app for the current forecast."],
