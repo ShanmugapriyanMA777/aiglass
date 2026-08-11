@@ -186,8 +186,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         body: JSON.stringify({
           frame_base64: base64,
           nav_active: navActive,
-          destination_number: extractDoorNumber(navDestination)
-        })
+          destination_number: extractDoorNumber(navDestination), lang: settings.voice_lang })
       });
 
       if (response.ok) {
@@ -321,7 +320,8 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
           body: JSON.stringify({
             frame_base64: base64,
             nav_active: navActive,
-            destination_number: extractDoorNumber(navDestination)
+            destination_number: extractDoorNumber(navDestination),
+            lang: settings.voice_lang
           })
         });
 
@@ -531,6 +531,16 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       }
     });
   }, [muted, settings.voice_automation]);
+
+  // Keep Voice Engine synced with Settings
+  useEffect(() => {
+    configureSpeech(
+      settings.voice_speed || 1.0,
+      settings.voice_lang || 'en-US',
+      settings.voice_pitch || 1.0,
+      settings.voice_volume || 1.0
+    );
+  }, [settings.voice_speed, settings.voice_lang, settings.voice_pitch, settings.voice_volume]);
 
   // Battery monitoring simulator
   useEffect(() => {
@@ -1449,8 +1459,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
               body: JSON.stringify({
                 frame_base64: base64,
                 nav_active: navActive,
-                destination_number: extractDoorNumber(navDestination)
-              })
+                destination_number: extractDoorNumber(navDestination), lang: settings.voice_lang })
             });
             if (res.ok) {
               const data = await res.json();
@@ -1797,6 +1806,24 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
                   <Mic className="w-3.5 h-3.5" /> AUTO VOICE
                 </div>
               )}
+              <button
+                onClick={() => {
+                  const nextLang = settings.voice_lang?.startsWith('ta') ? 'en-US' : 'ta-IN';
+                  const updated = { ...settings, voice_lang: nextLang };
+                  setSettings(updated);
+                  setItem('visionassist_settings', updated);
+                  configureSpeech(updated.voice_speed || 1.0, nextLang, updated.voice_pitch || 1.0, updated.voice_volume || 1.0);
+                  if (nextLang === 'ta-IN') {
+                    voiceEngine.general('தமிழ் மொழி தேர்வு செய்யப்பட்டது.');
+                  } else {
+                    voiceEngine.general('English language selected.');
+                  }
+                }}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-primary-200 bg-primary-50 hover:bg-primary-100 transition-colors text-xs font-bold text-primary-700"
+                title="Switch Language (English / தமிழ்)"
+              >
+                🌐 {settings.voice_lang?.startsWith('ta') ? 'தமிழ்' : 'EN'}
+              </button>
               <button onClick={() => setView('admin')} className="p-2 rounded-lg hover:bg-slate-100 transition-colors" title="Admin">
                 <BarChart3 className="w-5 h-5 text-slate-600" />
               </button>

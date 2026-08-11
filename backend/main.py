@@ -48,6 +48,7 @@ class FrameRequest(BaseModel):
     frame_base64: str
     nav_active: bool
     destination_number: str
+    lang: Optional[str] = "en-US"
 
 # ----------------- SCENE DESCRIPTION SUB-SYSTEM -----------------
 scene_last_called = 0
@@ -73,13 +74,15 @@ def call_vision_api_simulated(objects):
 
     return f"We are currently in a {env}. {crowd} I'll keep an eye out, so feel free to continue walking at your own pace."
 
-async def get_scene_description(frame_base64: str, objects: list) -> str:
+async def generate_scene_description(frame_base64, objects, lang="en-US"):
     global scene_last_called
     now = time.time()
     if now - scene_last_called < SCENE_INTERVAL:
         return None
     scene_last_called = now
     
+    is_tamil = lang and lang.lower().startswith("ta")
+
     # Check if OPENROUTER_API_KEY or other Vision API keys are in env
     api_key = os.getenv("OPENROUTER_API_KEY")
     if api_key:
@@ -89,7 +92,7 @@ async def get_scene_description(frame_base64: str, objects: list) -> str:
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json"
             }
-            # Simple call to OpenRouter with Gemini 2.5 Flash / Claude Vision
+            lang_instruction = " Respond in Tamil language using Tamil script." if is_tamil else ""
             payload = {
                 "model": "google/gemini-2.5-flash",
                 "messages": [
@@ -98,7 +101,7 @@ async def get_scene_description(frame_base64: str, objects: list) -> str:
                         "content": [
                             {
                                 "type": "text",
-                                "text": "Act as a friendly, caring partner walking alongside the user. Look at the image and analyze the whole scene holistically. For example, instead of listing 'chair, bottle, person', say 'You are in a classroom. There are two students sitting nearby, and there is enough space to continue walking. A chair is slightly to your right.' Keep it warm, conversational, and provide safe guidance. Do not use bullet points or markdown."
+                                "text": f"Act as a friendly, caring partner walking alongside the user. Look at the image and analyze the whole scene holistically. For example, instead of listing 'chair, bottle, person', say 'You are in a classroom. There are two students sitting nearby, and there is enough space to continue walking. A chair is slightly to your right.' Keep it warm, conversational, and provide safe guidance. Do not use bullet points or markdown.{lang_instruction}"
                             },
                             {
                                 "type": "image_url",
@@ -119,6 +122,15 @@ async def get_scene_description(frame_base64: str, objects: list) -> str:
             print(f"Vision API request failed: {e}")
 
     # Fallback to YOLO label template
+    if is_tamil:
+        if "car" in objects or "bus" in objects:
+            return "சாலையில் வாகனங்கள் உள்ளன. கவனமாக நடக்கவும்."
+        elif "person" in objects:
+            return "உங்களுக்கு அருகில் ஒரு நபர் நடக்கிறார்."
+        elif "chair" in objects:
+            return "உங்கள் முன் ஒரு நாற்காலி உள்ளது."
+        return "உங்களைச் சுற்றி நடப்பதற்குப் போதுமான இடம் உள்ளது."
+
     return call_vision_api_simulated(objects)
 
 # ----------------- OCR TEXT READER SUB-SYSTEM -----------------
@@ -152,7 +164,33 @@ def should_speak(text: str) -> bool:
     ocr_spoken_cache[key] = now
     return True
 
-def build_ocr_announcement(text: str, category: str, direction: str, nav_active: bool, destination_number: str) -> str:
+def build_ocr_announcement(text: str, category: str, direction: str, nav_active: bool, destination_number: str, lang: str = "en-US") -> str:
+    is_tamil = lang and lang.lower().startswith("ta")
+
+    if is_tamil:
+        dir_phrase = "உங்கள் வலதுபுறம்" if direction == "right" else "உங்கள் இடதுபுறம்" if direction == "left" else "உங்கள் முன்"
+        if category == "PHARMACY":
+            return f"{text} {dir_phrase} உள்ளது. மருத்துவ உதவி உள்ளது."
+        elif category == "HOSPITAL":
+            return f"{text} {dir_phrase} உள்ளது. அருகில் மருத்துவமனை உள்ளது."
+        elif category == "EMERGENCY":
+            return f"அவசரப் பிரிவு அடையாளம் {dir_phrase} கண்டறியப்பட்டது."
+        elif category == "BANK_ATM":
+            return f"ஏடிஎம் அல்லது வங்கி {dir_phrase} உள்ளது."
+        elif category == "FOOD":
+            return f"{text} {dir_phrase} உள்ளது."
+        elif category == "CAUTION":
+            return f"எச்சரிக்கை. {text} அடையாளம் {dir_phrase} உள்ளது. கவனமாகச் செல்லவும்."
+        elif category == "TRANSPORT":
+            return f"{text} {dir_phrase} உள்ளது."
+        elif category == "BUS_NUMBER":
+            return f"பேருந்து எண் {text} {dir_phrase} உள்ளது."
+        elif category == "DOOR_NUMBER":
+            if nav_active and destination_number and text == destination_number:
+                return f"கதவு எண் {text} உங்கள் முன் உள்ளது. இது உங்கள் இலக்கு."
+            return f"கதவு எண் {text} {dir_phrase} உள்ளது."
+        return f"{text} {dir_phrase} உள்ளது."
+
     dir_phrase = f"on your {direction}" if direction != "ahead" else "ahead"
 
     if category == "PHARMACY":
@@ -185,9 +223,9 @@ def build_ocr_announcement(text: str, category: str, direction: str, nav_active:
     else:
         return f"I read the text: {text}, {dir_phrase}."
 
-def run_ocr(frame, frame_width, nav_active=False, destination_number=""):
+def run_ocr(frame, frame_width, nav_active=False, destination_number="", lang="en-US"):
     if not HAS_OCR:
-        return run_ocr_simulated(frame_width, nav_active, destination_number)
+        return run_ocr_simulated(frame_width, nav_active, destination_number, lang)
 
     results = reader.readtext(frame)
     output = []
@@ -225,7 +263,7 @@ def run_ocr(frame, frame_width, nav_active=False, destination_number=""):
             category = "DOOR_NUMBER"
 
         direction = get_direction(bbox, frame_width)
-        announcement = build_ocr_announcement(text, category, direction, nav_active, destination_number)
+        announcement = build_ocr_announcement(text, category, direction, nav_active, destination_number, lang)
         
         output.append({
             "text": text,
@@ -236,7 +274,7 @@ def run_ocr(frame, frame_width, nav_active=False, destination_number=""):
         })
     return output
 
-def run_ocr_simulated(frame_width, nav_active=False, destination_number=""):
+def run_ocr_simulated(frame_width, nav_active=False, destination_number="", lang="en-US"):
     # Resilient simulated OCR rotation to test all frontend announcements
     now = time.time()
     sim_outputs = []
@@ -261,7 +299,7 @@ def run_ocr_simulated(frame_width, nav_active=False, destination_number=""):
         text, category, direction = "EMERGENCY WARD", "EMERGENCY", "ahead"
 
     if should_speak(text):
-        announcement = build_ocr_announcement(text, category, direction, nav_active, destination_number)
+        announcement = build_ocr_announcement(text, category, direction, nav_active, destination_number, lang)
         sim_outputs.append({
             "text": text,
             "category": category,
@@ -552,11 +590,12 @@ async def analyze_frame_endpoint(request: FrameRequest):
     yolo_boxes = run_yolo(frame)
     detected_labels = [b["class"] for b in yolo_boxes]
 
-    scene = await get_scene_description(request.frame_base64, detected_labels)
+    scene = await generate_scene_description(request.frame_base64, detected_labels, lang=request.lang)
     ocr_results = run_ocr(
         frame, frame_width,
         nav_active=request.nav_active,
-        destination_number=request.destination_number
+        destination_number=request.destination_number,
+        lang=request.lang
     )
     traffic = process_traffic_light(frame, yolo_boxes)
     zebra = detect_zebra_crossing(frame, yolo_boxes)
