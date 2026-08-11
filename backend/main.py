@@ -3,6 +3,7 @@ import time
 import re
 import json
 import os
+from typing import Optional
 from pydantic import BaseModel
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
