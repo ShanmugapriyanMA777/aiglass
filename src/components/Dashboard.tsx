@@ -956,7 +956,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       if (result.objects && result.objects.length > 0) {
         speakIfNotMuted(`Detected ${result.objects.length} objects.`);
         result.objects.forEach((obj) => {
-          const msg = generateVoiceMessage(obj);
+          const msg = generateVoiceMessage(obj, settings.voice_lang);
           voiceEngine.general(msg);
         });
         addHistory('object', `Detected ${result.objects.length} objects`, null, 'Objects detected');
@@ -1087,11 +1087,31 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         position: primary.position,
         timestamp: now
       };
-      const posText = primary.position === 'center' ? 'in front of you' : `on your ${primary.position}`;
-      const distText = primary.distanceMeters <= 1 ? 'very close' : `${primary.distanceMeters} meters away`;
-      const msg = `${primary.class} ${posText}, ${distText}.`;
-      speakIfNotMuted(msg);
-      addHistory('obstacle', msg, null, 'Alert');
+      const shortLang = settings.voice_lang ? settings.voice_lang.split('-')[0].toLowerCase() : 'en';
+
+      if (shortLang === 'ta') {
+        const taObj: Record<string, string> = {
+          person: 'நபர்', chair: 'நாற்காலி', laptop: 'லேப்டாப்', bottle: 'பாட்டில்',
+          car: 'கார்', bus: 'பேருந்து', truck: 'லாரி', motorcycle: 'மோட்டார் சைக்கிள்',
+          bicycle: 'மிதிவண்டி', backpack: 'பை', dog: 'நாய்', cat: 'பூனை',
+          table: 'மேஜை', cup: 'கப்', book: 'புத்தகம்', 'cell phone': 'தொலைபேசி'
+        };
+        const taPos: Record<string, string> = {
+          center: 'உங்கள் முன்', left: 'உங்கள் இடதுபுறம்', right: 'உங்கள் வலதுபுறம்'
+        };
+        const objName = taObj[primary.class.toLowerCase()] || primary.class;
+        const posText = taPos[primary.position] || primary.position;
+        const distText = primary.distanceMeters <= 1 ? 'மிக அருகில்' : `${primary.distanceMeters} மீட்டர் தொலைவில்`;
+        const msg = `${posText} ஒரு ${objName}, ${distText}.`;
+        speakIfNotMuted(msg);
+        addHistory('obstacle', msg, null, 'Alert');
+      } else {
+        const posText = primary.position === 'center' ? 'in front of you' : `on your ${primary.position}`;
+        const distText = primary.distanceMeters <= 1 ? 'very close' : `${primary.distanceMeters} meters away`;
+        const msg = `${primary.class} ${posText}, ${distText}.`;
+        speakIfNotMuted(msg);
+        addHistory('obstacle', msg, null, 'Alert');
+      }
     }
   }, [speakIfNotMuted, addHistory]);
 

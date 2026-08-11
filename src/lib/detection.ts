@@ -416,7 +416,50 @@ export async function analyzeFrame(
   }
 }
 
-export function generateVoiceMessage(obj: DetectedObject): string {
+export function generateVoiceMessage(obj: DetectedObject, lang?: string): string {
+  const shortLang = lang ? lang.split('-')[0].toLowerCase() : 'en';
+
+  if (shortLang === 'ta') {
+    const objNames: Record<string, string> = {
+      person: 'நபர்', chair: 'நாற்காலி', laptop: 'லேப்டாப்', backpack: 'பை',
+      bottle: 'பாட்டில்', cup: 'கப்', 'cell phone': 'தொலைபேசி', dog: 'நாய்',
+      cat: 'பூனை', car: 'கார்', bus: 'பேருந்து', truck: 'லாரி',
+      motorcycle: 'மோட்டார் சைக்கிள்', bicycle: 'மிதிவண்டி', book: 'புத்தகம்',
+      table: 'மேஜை', tv: 'தொலைக்காட்சி', couch: 'சோபா', bed: 'கட்டில்',
+      umbrella: 'குடை', clock: 'கடிகாரம்', 'stop sign': 'நிறுத்த அடையாளம்',
+      'traffic light': 'போக்குவரத்து விளக்கு', bench: 'பெஞ்ச்'
+    };
+    const posMap: Record<string, string> = {
+      center: 'உங்கள் நேர் முன்',
+      left: 'உங்கள் இடதுபுறம்',
+      right: 'உங்கள் வலதுபுறம்'
+    };
+    const name = objNames[obj.class.toLowerCase()] || obj.class;
+    const pos = posMap[obj.position] || obj.position;
+    const dist = obj.distanceMeters <= 1
+      ? 'மிக அருகில் உள்ளது!'
+      : `சுமார் ${obj.distanceMeters} மீட்டர் தொலைவில் உள்ளது.`;
+    return `${pos} ஒரு ${name} ${dist}`;
+  }
+
+  if (shortLang === 'hi') {
+    const objNames: Record<string, string> = {
+      person: 'व्यक्ति', chair: 'कुर्सी', laptop: 'लैपटॉप', backpack: 'बैग',
+      bottle: 'बोतल', cup: 'कप', dog: 'कुत्ता', cat: 'बिल्ली',
+      car: 'कार', table: 'मेज़', book: 'किताब'
+    };
+    const posMap: Record<string, string> = {
+      center: 'आपके सामने', left: 'आपके बाएं', right: 'आपके दाएं'
+    };
+    const name = objNames[obj.class.toLowerCase()] || obj.class;
+    const pos = posMap[obj.position] || obj.position;
+    const dist = obj.distanceMeters <= 1
+      ? 'बहुत पास है!'
+      : `लगभग ${obj.distanceMeters} मीटर दूर है।`;
+    return `${pos} एक ${name} ${dist}`;
+  }
+
+  // English default
   const posText = obj.position === 'center' ? 'right in front of you' : `on your ${obj.position}`;
   const distText = obj.distanceMeters <= 1 ? "and it's very close!" : `about ${obj.distanceMeters} meters away.`;
   return `I see a ${obj.class} ${posText}, ${distText}`;
