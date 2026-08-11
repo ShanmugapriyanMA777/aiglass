@@ -38,6 +38,11 @@ export interface DemoSession {
 export interface AppSettings {
   id?: string;
   voice_speed?: number;
+  voice_pitch?: number;
+  voice_volume?: number;
+  auto_speech?: boolean;
+  wake_word?: string;
+  assistant_name?: string;
   voice_lang?: string;
   confidence_threshold?: number;
   dark_mode?: boolean;

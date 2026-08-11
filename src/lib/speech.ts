@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-let currentSettings = { speed: 1.0, lang: 'en-US' };
+let currentSettings = { speed: 1.0, lang: 'en-US', pitch: 1.0, volume: 1.0 };
 let activeAudio: HTMLAudioElement | null = null;
 
 // Translation mappings for regional Indian languages
@@ -374,8 +374,8 @@ export function translateText(text: string, langCode: string): string {
 
 let isSpeakingInternal = false;
 
-export function configureSpeech(speed: number, lang: string) {
-  currentSettings = { speed, lang };
+export function configureSpeech(speed: number, lang: string, pitch = 1.0, volume = 1.0) {
+  currentSettings = { speed, lang, pitch, volume };
 }
 
 export function speak(text: string, onEnd?: () => void) {
@@ -470,6 +470,8 @@ export function speak(text: string, onEnd?: () => void) {
         console.warn('Online TTS play failed. Trying browser synthesis fallback:', err);
         const utterance = new SpeechSynthesisUtterance(translatedText);
         utterance.rate = currentSettings.speed;
+        utterance.pitch = currentSettings.pitch;
+        utterance.volume = currentSettings.volume;
         utterance.lang = currentSettings.lang;
         utterance.onend = handleEnd;
         utterance.onerror = handleEnd;
@@ -484,6 +486,8 @@ export function speak(text: string, onEnd?: () => void) {
   // Native web speech synthesis fallback / standard flow
   const utterance = new SpeechSynthesisUtterance(translatedText);
   utterance.rate = currentSettings.speed;
+  utterance.pitch = currentSettings.pitch;
+  utterance.volume = currentSettings.volume;
   utterance.lang = currentSettings.lang;
 
   if (voices.length > 0) {
@@ -529,6 +533,9 @@ export class SpeechRecognitionHelper {
   private silenceTimer: ReturnType<typeof setTimeout> | null = null;
   private finalTranscript = '';
   private readonly silenceMs: number;
+  private isContinuousMode = false;
+  private wakeWord = 'hey vision';
+  private requiresWakeWord = true;
 
   constructor(silenceMs = 1200) {
     this.silenceMs = silenceMs;
@@ -557,13 +564,36 @@ export class SpeechRecognitionHelper {
 
   private _commitTranscript() {
     this._clearSilenceTimer();
-    const text = this.finalTranscript.trim();
+    let text = this.finalTranscript.trim().toLowerCase();
     this.finalTranscript = '';
-    if (text && this.callback && this.active) {
-      this.callback(text);
+    
+    if (text && this.active && this.callback) {
+      if (this.requiresWakeWord) {
+        if (text.includes(this.wakeWord)) {
+          // Speak "Yes, I'm listening." if they only said the wake word, or just process the rest
+          const stripped = text.replace(new RegExp(`.*${this.wakeWord}`, 'i'), '').trim();
+          if (stripped.length > 0) {
+            this.callback(stripped);
+          } else {
+            // They just said the wake word.
+            this.callback(this.wakeWord);
+          }
+        }
+      } else {
+        this.callback(text);
+      }
     }
-    // Stop after committing so it fires onEnd
-    this.stop();
+    
+    // In continuous background mode, do not stop on commit, just let it keep listening
+    if (!this.isContinuousMode) {
+      this.stop();
+    }
+  }
+
+  setContinuousMode(continuous: boolean, requireWakeWord: boolean, wakeWord: string = 'hey vision') {
+    this.isContinuousMode = continuous;
+    this.requiresWakeWord = requireWakeWord;
+    this.wakeWord = wakeWord.toLowerCase();
   }
 
   start(callback: SpeechRecognitionCallback, onEnd?: () => void) {
@@ -623,11 +653,17 @@ export class SpeechRecognitionHelper {
       // If we have pending transcript, commit it
       if (this.finalTranscript.trim() && this.active) {
         this._clearSilenceTimer();
-        const text = this.finalTranscript.trim();
-        this.finalTranscript = '';
-        if (this.callback) this.callback(text);
+        this._commitTranscript();
       }
-      if (this.active && this.onEndCallback) {
+      
+      if (this.active && this.isContinuousMode) {
+        // Automatically restart if it was stopped by the browser and we are in continuous mode
+        try {
+          this.recognition.start();
+        } catch (e) {
+          console.warn('Speech recognition restart error:', e);
+        }
+      } else if (this.active && this.onEndCallback) {
         this.onEndCallback();
       }
     };

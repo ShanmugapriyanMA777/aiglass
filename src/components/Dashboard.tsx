@@ -8,86 +8,7 @@ import {
   CheckCircle2, AlertCircle, Loader2, ScanFace, RefreshCw, Shield, Glasses, BrainCircuit
 } from 'lucide-react';
 
-const PRIORITY = {
-  CRITICAL: 1,
-  WARNING: 2,
-  INFO: 3,
-  AMBIENT: 4
-};
-
-class VoiceQueue {
-  private queue: { text: string; priority: number }[] = [];
-  private speaking = false;
-  public onStateChange: (active: boolean, text: string, queueSize: number, priority: number) => void = () => {};
-  private currentText = '';
-  private currentPriority = 4;
-  private isMuted: () => boolean = () => false;
-
-  constructor(isMutedGetter: () => boolean) {
-    this.isMuted = isMutedGetter;
-  }
-
-  add(text: string, priority: number) {
-    if (this.queue.length > 5) {
-      this.queue = this.queue.filter(i => i.priority <= 2);
-    }
-    this.queue.push({ text, priority });
-    this.queue.sort((a, b) => a.priority - b.priority);
-    this.onStateChange(this.speaking, this.currentText, this.queue.length, this.currentPriority);
-    this.processSpeech();
-  }
-
-  private processSpeech() {
-    if (this.speaking || this.queue.length === 0) {
-      this.onStateChange(this.speaking, this.currentText, this.queue.length, this.currentPriority);
-      return;
-    }
-    const next = this.queue.shift()!;
-    this.speaking = true;
-    this.currentText = next.text;
-    this.currentPriority = next.priority;
-
-    if (next.priority === 1 && speechSynthesis.speaking) {
-      speechSynthesis.cancel();
-    }
-
-    this.onStateChange(true, this.currentText, this.queue.length, this.currentPriority);
-
-    if (this.isMuted()) {
-      setTimeout(() => {
-        this.speaking = false;
-        this.currentText = '';
-        this.processSpeech();
-      }, 500);
-      return;
-    }
-
-    const utterance = new SpeechSynthesisUtterance(next.text);
-    utterance.rate = 0.9;
-    utterance.pitch = 1.0;
-    utterance.volume = 1.0;
-    utterance.onend = () => {
-      this.speaking = false;
-      this.currentText = '';
-      this.processSpeech();
-    };
-    utterance.onerror = () => {
-      this.speaking = false;
-      this.currentText = '';
-      this.processSpeech();
-    };
-    speechSynthesis.speak(utterance);
-  }
-
-  critical(text: string) { this.add(text, PRIORITY.CRITICAL); }
-  warning(text: string) { this.add(text, PRIORITY.WARNING); }
-  info(text: string) { this.add(text, PRIORITY.INFO); }
-  ambient(text: string) { this.add(text, PRIORITY.AMBIENT); }
-  
-  public getStatus() {
-    return { speaking: this.speaking, text: this.currentText, size: this.queue.length, priority: this.currentPriority };
-  }
-}
+import { voiceEngine, VoicePriority } from '../lib/VoiceEngine';
 
 import { analyzeFrame, drawBoundingBoxes, getLocalModel, type VisionResult, askGemini, generateVoiceMessage, detectCurrency, type CurrencyDetectionResult } from '../lib/detection';
 import { speak, stopSpeaking, configureSpeech, SpeechRecognitionHelper, isSpeaking } from '../lib/speech';
@@ -134,8 +55,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
   const [ocrText, setOcrText] = useState('');
 
   // Scene Understanding states & voice queue refs
-  const voiceQueueRef = useRef<VoiceQueue | null>(null);
-  const mutedRef = useRef(muted);
+    const mutedRef = useRef(muted);
   useEffect(() => {
     mutedRef.current = muted;
   }, [muted]);
@@ -153,9 +73,9 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
 
   const prevTrafficColorRef = useRef<string>('--');
 
-  if (!voiceQueueRef.current) {
-    voiceQueueRef.current = new VoiceQueue(() => mutedRef.current);
-    voiceQueueRef.current.onStateChange = (active, text, queueSize, priority) => {
+  useEffect(() => {
+    voiceEngine.setMuteGetter(() => mutedRef.current);
+    voiceEngine.onStateChange = (active, text, queueSize, priority) => {
       setTimeout(() => {
         setVoiceSpeaking(active);
         setVoiceText(text);
@@ -273,7 +193,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       if (response.ok) {
         const result = await response.json();
         if (result.scene_description) {
-          voiceQueueRef.current?.info(result.scene_description);
+          voiceEngine.general(result.scene_description);
           setSceneText(result.scene_description);
         }
       }
@@ -300,9 +220,9 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       const prevColor = prevTrafficColorRef.current;
       if (tl.color !== prevColor) {
         if (prevColor === 'RED' && tl.color === 'GREEN') {
-          voiceQueueRef.current?.critical("Light has changed to green. You may cross now.");
+          voiceEngine.emergency("Light has changed to green. You may cross now.");
         } else if (prevColor === 'GREEN' && tl.color === 'RED') {
-          voiceQueueRef.current?.critical("Light has changed to red. Please stop immediately.");
+          voiceEngine.emergency("Light has changed to red. Please stop immediately.");
         }
         prevTrafficColorRef.current = tl.color;
       }
@@ -310,13 +230,13 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       if (tl.should_announce) {
         if (!zc || !zc.detected) {
           if (tl.low_light) {
-            voiceQueueRef.current?.warning("Traffic signal ahead. Low light detected. Proceed carefully.");
+            voiceEngine.safety("Traffic signal ahead. Low light detected. Proceed carefully.");
           } else if (tl.color === 'RED') {
-            voiceQueueRef.current?.critical("Red light ahead. Please stop and wait.");
+            voiceEngine.emergency("Red light ahead. Please stop and wait.");
           } else if (tl.color === 'GREEN') {
-            voiceQueueRef.current?.critical("Green light. Safe to cross now. Walk ahead.");
+            voiceEngine.emergency("Green light. Safe to cross now. Walk ahead.");
           } else if (tl.color === 'YELLOW') {
-            voiceQueueRef.current?.warning("Yellow light ahead. Prepare to stop.");
+            voiceEngine.safety("Yellow light ahead. Prepare to stop.");
           }
         }
       }
@@ -333,23 +253,23 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       if (zc.detected && zc.should_announce) {
         if (tl && tl.detected && tl.confirmed) {
           if (tl.color === "RED") {
-            voiceQueueRef.current?.critical("Red light at zebra crossing. Please wait on the footpath. Do not step onto the crossing.");
+            voiceEngine.emergency("Red light at zebra crossing. Please wait on the footpath. Do not step onto the crossing.");
           } else if (tl.color === "GREEN") {
-            voiceQueueRef.current?.critical("Green light at zebra crossing. Safe to cross now. Walk straight across.");
+            voiceEngine.emergency("Green light at zebra crossing. Safe to cross now. Walk straight across.");
           } else if (tl.color === "YELLOW") {
-            voiceQueueRef.current?.warning("Yellow light at zebra crossing. Wait for green before crossing.");
+            voiceEngine.safety("Yellow light at zebra crossing. Wait for green before crossing.");
           }
         } else {
           if (zc.state === "APPROACHING") {
-            voiceQueueRef.current?.warning("Zebra crossing detected ahead. No traffic light. Look left and right before crossing.");
+            voiceEngine.safety("Zebra crossing detected ahead. No traffic light. Look left and right before crossing.");
           } else if (zc.state === "AT_CROSSING") {
-            voiceQueueRef.current?.warning("You are at the zebra crossing. Check for vehicles then cross carefully.");
+            voiceEngine.safety("You are at the zebra crossing. Check for vehicles then cross carefully.");
           }
         }
       }
 
       if (zc.detected && zc.vehicle_on_crossing) {
-        voiceQueueRef.current?.critical("Vehicle on the crossing. Stop and wait. Do not cross yet.");
+        voiceEngine.emergency("Vehicle on the crossing. Stop and wait. Do not cross yet.");
       }
     } else {
       setZebraCrossingState('NONE');
@@ -359,16 +279,16 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     if (result.ocr_results && result.ocr_results.length > 0) {
       result.ocr_results.forEach((item: any) => {
         if (item.category === "CAUTION" || item.category === "EMERGENCY") {
-          voiceQueueRef.current?.warning(item.announcement);
+          voiceEngine.safety(item.announcement);
         } else {
-          voiceQueueRef.current?.info(item.announcement);
+          voiceEngine.general(item.announcement);
         }
         setOcrText(`${item.text} (${item.category}) — ${item.direction}`);
       });
     }
 
     if (result.scene_updated && result.scene_description) {
-      voiceQueueRef.current?.ambient(result.scene_description);
+      voiceEngine.general(result.scene_description);
       setSceneText(result.scene_description);
     }
   }, []);
@@ -494,7 +414,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         await setItem('visionassist_settings', loadedSettings);
       }
       setSettings(loadedSettings);
-      configureSpeech(loadedSettings.voice_speed || 1.0, loadedSettings.voice_lang || 'en-US');
+      configureSpeech(loadedSettings.voice_speed || 1.0, loadedSettings.voice_lang || 'en-US', loadedSettings.voice_pitch || 1.0, loadedSettings.voice_volume || 1.0);
 
       // Load registered faces
       const savedFaces = await getItem<string[] | null>('visionassist_registered_faces', null);
@@ -534,6 +454,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       setContacts(loadedContacts);
     })();
     speechHelperRef.current = new SpeechRecognitionHelper();
+    speechHelperRef.current.setContinuousMode(true, true, settings?.wake_word || 'hey vision');
   }, []);
 
   // Load history
@@ -589,17 +510,21 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       return;
     }
     if (speechHelperRef.current) {
+      // Pause listening while we speak
       speechHelperRef.current.stop();
       setListening(false);
     }
+    
     setSpeakingState(true);
-    speak(text, () => {
+    
+    // Route everything through the new VoiceEngine priority queue
+    voiceEngine.general(text, () => {
       setSpeakingState(false);
       if (onEnd) {
         onEnd();
       } else if (settings.voice_automation) {
         setTimeout(() => {
-          if (settings.voice_automation && !isSpeaking()) {
+          if (settings.voice_automation && !voiceEngine.getStatus().speaking) {
             startListeningRef.current();
           }
         }, 400);
@@ -652,7 +577,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         isAnalyzingRef.current = true;
         setAnalyzing(true);
         try {
-          const result = await analyzeFrame(videoRef.current, 'Describe this scene in one clear sentence for a visually impaired person.', settings.voice_lang);
+          const result = await analyzeFrame(videoRef.current, 'Act as a friendly, caring assistant. Describe this scene naturally in 1-2 sentences as if speaking to a friend who is visually impaired.', settings.voice_lang);
           
           if (result.scene) {
             speakIfNotMuted(result.scene);
@@ -904,7 +829,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     setAnalyzing(true);
     setError('');
     try {
-      const result = await analyzeFrame(videoRef.current, 'Describe this scene in one clear sentence for a visually impaired person. Respond with JSON: {"scene": "description", "objects": [], "text": "", "colors": [], "currency": "", "warning": ""}.', settings.voice_lang);
+      const result = await analyzeFrame(videoRef.current, 'Act as a friendly, caring assistant. Describe this scene naturally in 1-2 sentences as if speaking to a friend who is visually impaired. Respond with JSON: {"scene": "description", "objects": [], "text": "", "colors": [], "currency": "", "warning": ""}.', settings.voice_lang);
       setSceneText(result.scene);
       speakIfNotMuted(result.scene);
       addHistory('scene', result.scene.slice(0, 50), null, 'Scene described');
@@ -971,7 +896,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         // Smart Detection
         if (result.currency !== lastSpokenCurrency.current) {
           lastSpokenCurrency.current = result.currency;
-          voiceQueueRef.current?.info(`This is a ${result.value_text || result.currency}`);
+          voiceEngine.general(`This is a ${result.value_text || result.currency}`);
           
           setCurrencyHistory(prev => [{
             time: new Date().toLocaleTimeString(),
@@ -1032,7 +957,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         speakIfNotMuted(`Detected ${result.objects.length} objects.`);
         result.objects.forEach((obj) => {
           const msg = generateVoiceMessage(obj);
-          voiceQueueRef.current?.info(msg);
+          voiceEngine.general(msg);
         });
         addHistory('object', `Detected ${result.objects.length} objects`, null, 'Objects detected');
       } else {
@@ -1513,7 +1438,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
               const data = await res.json();
               if (data.ocr_results && data.ocr_results.length > 0) {
                 data.ocr_results.forEach((item: any) => {
-                  voiceQueueRef.current?.info(item.announcement);
+                  voiceEngine.general(item.announcement);
                 });
               } else {
                 speakIfNotMuted("No text or signs detected.");
@@ -1526,25 +1451,25 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       }
     } else if (normalizedCmd.includes('safe to cross') || normalizedCmd.includes('safe') || normalizedCmd.includes('cross')) {
       if (trafficColor === 'RED') {
-        voiceQueueRef.current?.critical("Red light detected. It is not safe to cross yet.");
+        voiceEngine.emergency("Red light detected. It is not safe to cross yet.");
       } else if (trafficColor === 'GREEN') {
-        voiceQueueRef.current?.critical("Green light. Zebra crossing ahead. Safe to cross.");
+        voiceEngine.emergency("Green light. Zebra crossing ahead. Safe to cross.");
       } else if (trafficColor === 'YELLOW') {
-        voiceQueueRef.current?.warning("Yellow light detected. Prepare to stop.");
+        voiceEngine.safety("Yellow light detected. Prepare to stop.");
       } else {
-        voiceQueueRef.current?.info("No traffic light detected. Look carefully before crossing.");
+        voiceEngine.general("No traffic light detected. Look carefully before crossing.");
       }
     } else if (normalizedCmd.includes('what color is the light') || normalizedCmd.includes('light color') || normalizedCmd.includes('color of the light')) {
       if (trafficColor !== '--') {
-        voiceQueueRef.current?.info(`The traffic light is currently ${trafficColor.toLowerCase()}.`);
+        voiceEngine.general(`The traffic light is currently ${trafficColor.toLowerCase()}.`);
       } else {
-        voiceQueueRef.current?.info("No traffic light is detected currently.");
+        voiceEngine.general("No traffic light is detected currently.");
       }
     } else if (normalizedCmd.includes('is there a zebra crossing') || normalizedCmd.includes('zebra crossing') || normalizedCmd.includes('crossing')) {
       if (zebraCrossingState !== 'NONE') {
-        voiceQueueRef.current?.info(`Yes, a zebra crossing is detected ${zebraCrossingState === 'AT_CROSSING' ? 'at your position' : 'ahead'}.`);
+        voiceEngine.general(`Yes, a zebra crossing is detected ${zebraCrossingState === 'AT_CROSSING' ? 'at your position' : 'ahead'}.`);
       } else {
-        voiceQueueRef.current?.info("No zebra crossing detected currently.");
+        voiceEngine.general("No zebra crossing detected currently.");
       }
     }
     // Context Info
@@ -1894,16 +1819,9 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
             </div>
             
             <div className="flex items-center gap-2">
-              <span className="text-xs text-slate-500 font-medium">Mood:</span>
-              <span className={`text-sm font-semibold px-2 py-0.5 rounded-full ${aiMood === 'Calm' ? 'bg-blue-50 text-blue-600' : aiMood === 'Thinking' ? 'bg-purple-50 text-purple-600 animate-pulse' : 'bg-green-50 text-green-600'}`}>
-                {aiMood === 'Calm' ? '😊 Calm' : aiMood === 'Thinking' ? '🤔 Thinking' : '🗣️ Speaking'}
-              </span>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-slate-500 font-medium">Listening:</span>
-              <span className={`text-sm font-semibold px-2 py-0.5 rounded-full ${listening ? 'bg-success-50 text-success-600 animate-pulse' : 'bg-slate-100 text-slate-600'}`}>
-                {listening ? '🟢 Active' : '⚪ Standby'}
+              <span className="text-xs text-slate-500 font-medium">State:</span>
+              <span className={`text-sm font-semibold px-2 py-0.5 rounded-full ${isOffline ? 'bg-slate-100 text-slate-500' : navActive ? 'bg-primary-50 text-primary-600' : voiceSpeaking ? 'bg-green-50 text-green-600 animate-pulse' : aiMood === 'Thinking' ? 'bg-purple-50 text-purple-600 animate-pulse' : listening ? 'bg-blue-50 text-blue-600 animate-pulse' : 'bg-slate-100 text-slate-600'}`}>
+                {isOffline ? '🔌 Offline' : navActive ? '🧭 Navigation' : voiceSpeaking ? '🗣️ Speaking' : aiMood === 'Thinking' ? '🤔 Thinking' : listening ? '🟢 Listening' : '⚪ Standby'}
               </span>
             </div>
             
@@ -2860,7 +2778,7 @@ function SettingsView({ onBack, settings, setSettings, contacts, setContacts, re
       console.warn('Failed to save settings/config to Supabase:', e);
     }
     setSettings(local);
-    configureSpeech(local.voice_speed || 1.0, local.voice_lang || 'en-US');
+    configureSpeech(local.voice_speed || 1.0, local.voice_lang || 'en-US', local.voice_pitch || 1.0, local.voice_volume || 1.0);
     onBack();
   };
 
@@ -2961,6 +2879,35 @@ function SettingsView({ onBack, settings, setSettings, contacts, setContacts, re
                   className="w-5 h-5 accent-primary-600 rounded cursor-pointer"
                 />
               </div>
+
+              {/* JARVIS Settings */}
+              <div className="pt-4 border-t border-slate-100 space-y-4">
+                <div>
+                  <label className="text-sm font-medium text-slate-600 block mb-2">Assistant Name</label>
+                  <input type="text" placeholder="Vision" value={local.assistant_name || 'Vision'}
+                    onChange={(e) => setLocal({ ...local, assistant_name: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-primary-300 focus:outline-none" />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-600 block mb-2">Wake Word</label>
+                  <input type="text" placeholder="Hey Vision" value={local.wake_word || 'Hey Vision'}
+                    onChange={(e) => setLocal({ ...local, wake_word: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-primary-300 focus:outline-none" />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-600 block mb-2">Voice Pitch: {local.voice_pitch || 1.0}</label>
+                  <input type="range" min="0.5" max="2.0" step="0.1" value={local.voice_pitch || 1.0}
+                    onChange={(e) => setLocal({ ...local, voice_pitch: parseFloat(e.target.value) })}
+                    className="w-full accent-primary-600" />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-600 block mb-2">Voice Volume: {local.voice_volume || 1.0}</label>
+                  <input type="range" min="0.1" max="1.0" step="0.1" value={local.voice_volume || 1.0}
+                    onChange={(e) => setLocal({ ...local, voice_volume: parseFloat(e.target.value) })}
+                    className="w-full accent-primary-600" />
+                </div>
+              </div>
+
             </div>
           </div>
 
