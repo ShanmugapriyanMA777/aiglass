@@ -88,7 +88,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         }
       }, 0);
     };
-  }
+  }, []);
 
   const [sceneText, setSceneText] = useState('');
   const [colorResult, setColorResult] = useState<{ name: string; hex: string } | null>(null);
