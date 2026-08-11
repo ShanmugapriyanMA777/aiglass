@@ -470,6 +470,15 @@ export function speak(text: string, onEnd?: () => void) {
         utterance.pitch = currentSettings.pitch;
         utterance.volume = currentSettings.volume;
         utterance.lang = currentSettings.lang;
+        
+        if (voices.length > 0) {
+          const matchedVoice = voices.find(v => v.lang.toLowerCase() === lang.toLowerCase()) ||
+                               voices.find(v => v.lang.toLowerCase().startsWith(lang.split('-')[0].toLowerCase()));
+          if (matchedVoice) {
+            utterance.voice = matchedVoice;
+          }
+        }
+
         utterance.onend = handleEnd;
         utterance.onerror = handleEnd;
         window.speechSynthesis.speak(utterance);

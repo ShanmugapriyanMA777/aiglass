@@ -1079,9 +1079,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
 
     const needsAnnounce = 
       !lastSpoken || 
-      (now - lastSpoken.timestamp > 15000) || 
-      (lastSpoken.position !== primary.position) || 
-      (Math.abs(lastSpoken.distanceMeters - primary.distanceMeters) >= 0.6);
+      (now - lastSpoken.timestamp > 15000); // Strict 15 second cooldown per object class to prevent spamming
 
     if (needsAnnounce) {
       lastSpokenObstaclesRef.current[key] = {
