@@ -588,18 +588,32 @@ async def ask_gemini_endpoint(request: GeminiAskRequest):
     if not api_key:
         # Smart offline fallbacks for fully offline privacy mode
         q = request.question.lower()
-        if any(w in q for w in ["time", "what time", "clock"]):
+        is_tamil = request.lang and request.lang.lower().startswith('ta')
+
+        if any(w in q for w in ["time", "what time", "clock", "நேரம்"]):
+            if is_tamil:
+                return {"answer": f"தற்போதைய நேரம் {current_time}."}
             return {"answer": f"The current time is {current_time}."}
-        if any(w in q for w in ["date", "today", "day"]):
+        if any(w in q for w in ["date", "today", "day", "தேதி", "இன்று"]):
+            if is_tamil:
+                return {"answer": f"இன்றைய தேதி {current_date}."}
             return {"answer": f"Today is {current_date}."}
-        if any(w in q for w in ["who are you", "what are you", "your name"]):
+        if any(w in q for w in ["who are you", "what are you", "your name", "யார்"]):
+            if is_tamil:
+                return {"answer": f"நான் {request.assistant_name}, உங்களின் செயற்கை நுண்ணறிவு ஸ்மார்ட் கிளாஸ் உதவியாளர்."}
             return {"answer": f"I am {request.assistant_name}, your AI-powered smart glasses assistant."}
-        if any(w in q for w in ["hello", "hi ", "hey"]):
+        if any(w in q for w in ["hello", "hi ", "hey", "வணக்கம்"]):
+            if is_tamil:
+                return {"answer": "வணக்கம்! நான் உங்களுக்கு எப்படி உதவ முடியும்?"}
             return {"answer": "Hello! How can I help you today?"}
-        if "help" in q:
+        if any(w in q for w in ["help", "உதவி"]):
+            if is_tamil:
+                return {"answer": "நான் உங்களைச் சுற்றியுள்ள காட்சிகளை விவரிக்கவும், உரையைப் படிக்கவும், பொருட்களைக் கண்டறியவும், பணத்தை அடையாளம் காணவும், எந்த இடத்திற்கும் வழிகாட்டவும் முடியும். என்னிடம் கேளுங்கள்!"}
             return {"answer": "I can describe your surroundings, read text, detect objects, identify currency, and navigate you to any destination. Just ask!"}
         
         # General conversational fallback without API
+        if is_tamil:
+            return {"answer": f"நீங்கள் '{request.question}' என்று சொல்வதைக் கேட்டேன். நான் இப்போது இணைய இணைப்பு இல்லாமல் இயங்குவதால், என் உரையாடல் திறன் குறைவாக உள்ளது. ஆனால் உங்களுக்கு வழிகாட்டவும், உரையைப் படிக்கவும் நான் தயாராக இருக்கிறேன்!"}
         return {"answer": f"I heard you say '{request.question}'. Since I am running in fully offline privacy mode right now without an active internet AI connection, my conversational abilities are limited, but I am still here to help you navigate, read text, and detect objects around you!"}
 
     try:
@@ -619,7 +633,7 @@ async def ask_gemini_endpoint(request: GeminiAskRequest):
             }
             short_lang = request.lang.split("-")[0]
             lang_name = lang_map.get(short_lang, request.lang)
-            lang_instruction = f" Respond in {lang_name} language."
+            lang_instruction = f" You MUST respond completely in natural, fluent {lang_name} language without mixing English words."
 
         system_prompt = (
             f"You are {request.assistant_name}, a friendly, caring, calm, respectful, and supportive AI partner built into smart glasses. "
