@@ -411,15 +411,12 @@ export function speak(text: string, onEnd?: () => void) {
   const translatedText = translateText(text, lang);
   console.log(`TTS Original: "${text}" | Translated to ${lang}: "${translatedText}"`);
 
-  // Query native system voices
+  // Query native system voices for English
   const voices = window.speechSynthesis.getVoices();
-  const hasNativeVoice = voices.some(v => 
-    v.lang.toLowerCase().startsWith(lang.split('-')[0].toLowerCase())
-  );
 
-  // If a native voice for the selected language is not installed/available (e.g. Hindi, Tamil, Telugu),
-  // use online TTS service fallback.
-  if (!isEnglish && !hasNativeVoice) {
+  // For regional languages (Tamil, Hindi, etc), native browser voices are often broken or 
+  // read with an English accent. Always use the high-quality Google TTS / Backend TTS.
+  if (!isEnglish) {
     if (!navigator.onLine) {
       // OFFLINE MODE: Use backend TTS
       console.log(`Offline Mode: Using local backend TTS for ${lang}.`);
