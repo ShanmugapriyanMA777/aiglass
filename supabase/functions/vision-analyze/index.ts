@@ -67,7 +67,7 @@ Detect up to 8 objects. Use lowercase class names. Estimate distance from object
       const shortLang = lang.split('-')[0].toLowerCase();
       const langName = langNames[shortLang] || shortLang;
       activePrompt += `\n\nCRITICAL LANGUAGE REQUIREMENT: The user's preferred language is ${langName} (${lang}). 
-You MUST respond with completely natural and fluent ${langName} without mixing any English words. Translate all human-readable string values in the JSON output into ${langName} (using the correct regional script, e.g. Devanagari for Hindi, Tamil script for Tamil, etc.). This includes translation of:
+You MUST respond with completely natural and fluent ${langName} without mixing any English words. STRICT RULE: Use ONLY the native script of the language (e.g. Tamil script for Tamil). Do NOT use English letters or words anywhere in your response, including brand names or recognized text. Translate all human-readable string values in the JSON output into ${langName} (using the correct regional script, e.g. Devanagari for Hindi, Tamil script for Tamil, etc.). This includes translation of:
 - The 'scene' description string (make it sound like a friendly human companion speaking in ${langName})
 - The 'text' string (translate any English text read in the image to ${langName} or represent it in ${langName})
 - The 'warning' obstacle warning string

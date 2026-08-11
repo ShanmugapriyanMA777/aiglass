@@ -806,7 +806,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     setError('');
     speakIfNotMuted('Let me read that for you.');
     try {
-      const result = await analyzeFrame(videoRef.current, 'Read all text visible in this image and summarize it naturally. For example: "This appears to be a medicine label. The medicine is Paracetamol 500 mg. The expiry date is December 2027." Respond with a JSON object: {"text": "the natural summary", "objects": [], "scene": "", "colors": [], "currency": "", "warning": ""}. If no text is visible, return empty string for text.', settings.voice_lang);
+      const result = await analyzeFrame(videoRef.current, 'Read all text visible in this image and summarize it naturally. CRITICAL: If the target language is NOT English, you MUST fully translate ALL recognized English text into the target language script (e.g., use Tamil letters for Tamil, never English letters). For example: "This appears to be a medicine label. The medicine is Paracetamol 500 mg. The expiry date is December 2027." Respond with a JSON object: {"text": "the natural summary", "objects": [], "scene": "", "colors": [], "currency": "", "warning": ""}. If no text is visible, return empty string for text.', settings.voice_lang);
       setOcrText(result.text);
       if (result.text) {
         speakIfNotMuted(result.text.slice(0, 200));

@@ -633,7 +633,7 @@ async def ask_gemini_endpoint(request: GeminiAskRequest):
             }
             short_lang = request.lang.split("-")[0]
             lang_name = lang_map.get(short_lang, request.lang)
-            lang_instruction = f" You MUST respond completely in natural, fluent {lang_name} language without mixing English words."
+            lang_instruction = f" You MUST respond completely in natural, fluent {lang_name} language without mixing English words. STRICT RULE: Use ONLY the native script of the language (e.g. Tamil script for Tamil). Do NOT use English letters or words. If you read english text, TRANSLATE IT to the target language."
 
         system_prompt = (
             f"You are {request.assistant_name}, a friendly, caring, calm, respectful, and supportive AI partner built into smart glasses. "
