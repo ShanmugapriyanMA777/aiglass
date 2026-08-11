@@ -347,6 +347,17 @@ export function translateText(text: string, langCode: string): string {
     if (shortLang === 'kn') return `${transObj} ${transPos}, ${transDist} ಇದೆ.`;
   }
 
+  // Currency pattern: "This is a 500 rupees note"
+  const currMatch = translated.match(/This is a (.+)/i);
+  if (currMatch) {
+    const rawVal = currMatch[1].trim();
+    const transVal = dict[rawVal.toLowerCase()] || rawVal;
+    if (shortLang === 'ta') return `இது ஒரு ${transVal} ஆகும்.`;
+    if (shortLang === 'hi') return `यह ${transVal} है।`;
+    if (shortLang === 'te') return `ఇది ${transVal}.`;
+    if (shortLang === 'kn') return `இது ${transVal}.`;
+  }
+
   // Search routing / place confirmations
   if (translated.startsWith("Searching nearest ")) {
     const term = translated.replace("Searching nearest ", "").trim();
