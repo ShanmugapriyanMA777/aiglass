@@ -240,20 +240,59 @@ export async function analyzeFrame(
 
         // Build heuristic scene description
         let scene = '';
+        const shortLang = targetLang ? targetLang.split('-')[0].toLowerCase() : 'en';
+
         if (objects.length > 0) {
-          const descriptions = objects.map(o => `a ${o.class} on your ${o.position === 'center' ? 'front' : o.position}`);
-          scene = `I can see ${descriptions.join(', and ')}.`;
+          if (shortLang === 'ta') {
+            const posMap: Record<string, string> = {
+              center: 'உங்கள் நேர் முன்',
+              left: 'உங்கள் இடதுபுறம்',
+              right: 'உங்கள் வலதுபுறம்'
+            };
+            const descriptions = objects.map(o => `${posMap[o.position] || o.position} ஒரு ${o.class}`);
+            scene = `${descriptions.join(', மற்றும் ')} உள்ளது.`;
+          } else if (shortLang === 'hi') {
+            const posMap: Record<string, string> = {
+              center: 'आपके सामने',
+              left: 'आपके बाएं',
+              right: 'आपके दाएं'
+            };
+            const descriptions = objects.map(o => `${posMap[o.position] || o.position} एक ${o.class}`);
+            scene = `${descriptions.join(', और ')} है।`;
+          } else {
+            const descriptions = objects.map(o => `a ${o.class} on your ${o.position === 'center' ? 'front' : o.position}`);
+            scene = `I can see ${descriptions.join(', and ')}.`;
+          }
         } else {
-          scene = 'The path in front of you is clear.';
+          if (shortLang === 'ta') {
+            scene = 'உங்கள் முன் செல்லும் பாதை தெளிவாக உள்ளது.';
+          } else if (shortLang === 'hi') {
+            scene = 'आपके सामने का रास्ता साफ है।';
+          } else {
+            scene = 'The path in front of you is clear.';
+          }
         }
 
         const nearObstacle = objects.find(o => o.distanceMeters <= 1.2);
-        const warning = nearObstacle ? `Warning: ${nearObstacle.class} is very close at ${nearObstacle.distanceMeters} meters` : '';
+        let warning = '';
+        if (nearObstacle) {
+          if (shortLang === 'ta') {
+            const posMap: Record<string, string> = {
+              center: 'உங்கள் முன்',
+              left: 'உங்கள் இடதுபுறம்',
+              right: 'உங்கள் வலதுபுறம்'
+            };
+            const posText = posMap[nearObstacle.position] || nearObstacle.position;
+            warning = `எச்சரிக்கை: ${posText} ஒரு ${nearObstacle.class} மிக அருகில் உள்ளது.`;
+          } else {
+            warning = `Warning: ${nearObstacle.class} is very close at ${nearObstacle.distanceMeters} meters`;
+          }
+        }
 
-        // Translate scene & warning
+        // Translate scene & warning if needed
         let finalScene = scene;
         let finalWarning = warning;
-        if (targetLang && targetLang !== 'en-US') {
+        if (targetLang && targetLang !== 'en-US' && shortLang !== 'ta' && shortLang !== 'hi') {
           finalScene = translateText(scene, targetLang);
           if (warning) {
             finalWarning = translateText(warning, targetLang);

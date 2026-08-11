@@ -248,7 +248,7 @@ const translations: Record<string, Record<string, string>> = {
     "soft gray": "బూడిద రంగు",
     "crimson red": "ఎరుపు",
     "red": "ఎరుపు",
-    "gold": "బಂಗారు రంగు",
+    "gold": "బంగారు రంగు",
     "rupees": "రూపాయలు"
   },
   kn: {
@@ -406,8 +406,16 @@ export function translateText(text: string, langCode: string): string {
     const pos = objMatch[2].toLowerCase();
     const dist = objMatch[3].toLowerCase();
 
+    const posMapTa: Record<string, string> = {
+      'in front of you': 'உங்கள் முன்',
+      'on your left': 'உங்கள் இடதுபுறம்',
+      'on your right': 'உங்கள் வலதுபுறம்',
+      'center': 'உங்கள் முன்',
+      'left': 'உங்கள் இடதுபுறம்',
+      'right': 'உங்கள் வலதுபுறம்'
+    };
     const transObj = dict[objName] || objName;
-    const transPos = dict[pos] || pos;
+    const transPos = (shortLang === 'ta' ? posMapTa[pos] : null) || dict[pos] || pos;
     
     let transDist = dist;
     if (dist.includes("meters away")) {
@@ -421,9 +429,25 @@ export function translateText(text: string, langCode: string): string {
     }
 
     if (shortLang === 'hi') return `${transObj} ${transPos}, ${transDist} है।`;
-    if (shortLang === 'ta') return `${transObj} ${transPos}, ${transDist} உள்ளது.`;
+    if (shortLang === 'ta') return `${transPos} ஒரு ${transObj}, ${transDist} உள்ளது.`;
     if (shortLang === 'te') return `${transObj} ${transPos}, ${transDist} ఉంది.`;
     if (shortLang === 'kn') return `${transObj} ${transPos}, ${transDist} ಇದೆ.`;
+  }
+
+  // Heuristic scene fallback pattern: "I can see a chair on your left."
+  if (translated.toLowerCase().startsWith("i can see ")) {
+    if (shortLang === 'ta') {
+      const text = translated
+        .replace(/I can see /i, '')
+        .replace(/\./g, '')
+        .replace(/on your left/gi, 'உங்கள் இடதுபுறம்')
+        .replace(/on your right/gi, 'உங்கள் வலதுபுறம்')
+        .replace(/on your front/gi, 'உங்கள் முன்')
+        .replace(/in front of you/gi, 'உங்கள் முன்')
+        .replace(/\ba\b/gi, 'ஒரு')
+        .replace(/, and /gi, ', மற்றும் ');
+      return `${text} உள்ளது.`;
+    }
   }
 
   // Currency pattern: "This is a 500 rupees note"
