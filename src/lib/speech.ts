@@ -93,7 +93,6 @@ const translations: Record<string, Record<string, string>> = {
 
     // === Dynamic speech phrases (these were missing and caused English speech) ===
     "let me read that for you.": "நான் உங்களுக்காக படிக்கிறேன்.",
-    "no text found.": "எந்த எழுத்தும் கிடைக்கவில்லை.",
     "my camera is on! i am taking a look around for you.": "என் கேமரா ஆன் செய்யப்பட்டுள்ளது! உங்களுக்காக நான் சுற்றிப் பார்க்கிறேன்.",
     "let me see what objects are around us.": "நம்மைச் சுற்றி என்ன பொருட்கள் இருக்கின்றன என்று பார்க்கிறேன்.",
     "no objects detected.": "எந்த பொருளும் கண்டறியப்படவில்லை.",
