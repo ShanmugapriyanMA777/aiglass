@@ -24,3 +24,4 @@ dist-ssr
 __pycache__/
 *.pyc
 runs/
+yolov8n.pt
