@@ -2102,32 +2102,51 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
                   </div>
                 )}
               </div>
-              <div className="p-4 flex gap-2">
-                {!cameraOn ? (
-                  <button
-                    onClick={() => startCamera()}
-                    disabled={cameraStatus === 'starting'}
-                    className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-primary-600 to-accent-500 text-white font-semibold flex items-center justify-center gap-2 hover:shadow-lg hover:brightness-105 transition-all disabled:opacity-50"
-                  >
-                    <Play className="w-5 h-5" /> Start Camera
-                  </button>
-                ) : (
-                  <>
+              <div className="p-4 flex flex-col gap-2">
+                <div className="flex gap-2">
+                  {!cameraOn ? (
                     <button
-                      onClick={stopCamera}
-                      className="flex-1 px-4 py-3 rounded-xl bg-error-500 hover:bg-error-600 text-white font-semibold flex items-center justify-center gap-2 hover:shadow-md transition-all"
+                      onClick={() => startCamera()}
+                      disabled={cameraStatus === 'starting'}
+                      className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-primary-600 to-accent-500 text-white font-semibold flex items-center justify-center gap-2 hover:shadow-lg hover:brightness-105 transition-all disabled:opacity-50"
                     >
-                      <Square className="w-5 h-5" /> Stop Camera
+                      <Play className="w-5 h-5" /> Start Camera
                     </button>
-                    <button
-                      onClick={toggleCamera}
-                      className="px-4 py-3 rounded-xl bg-slate-100 text-slate-700 font-semibold flex items-center justify-center gap-2 hover:bg-slate-200 transition-all border border-slate-200"
-                      title="Flip Camera"
-                    >
-                      <RefreshCw className="w-5 h-5" /> Flip
-                    </button>
-                  </>
-                )}
+                  ) : (
+                    <>
+                      <button
+                        onClick={stopCamera}
+                        className="flex-1 px-4 py-3 rounded-xl bg-error-500 hover:bg-error-600 text-white font-semibold flex items-center justify-center gap-2 hover:shadow-md transition-all"
+                      >
+                        <Square className="w-5 h-5" /> Stop Camera
+                      </button>
+                      <button
+                        onClick={toggleCamera}
+                        className="px-4 py-3 rounded-xl bg-slate-100 text-slate-700 font-semibold flex items-center justify-center gap-2 hover:bg-slate-200 transition-all border border-slate-200"
+                        title="Flip Camera"
+                      >
+                        <RefreshCw className="w-5 h-5" /> Flip
+                      </button>
+                    </>
+                  )}
+                </div>
+
+                {/* Dedicated Instant Currency Detector Button */}
+                <button
+                  onClick={async () => {
+                    if (!cameraOn) {
+                      await startCamera();
+                      setTimeout(scanCurrencyNow, 1200);
+                    } else {
+                      scanCurrencyNow();
+                    }
+                  }}
+                  disabled={analyzing}
+                  className="w-full px-4 py-3 rounded-xl bg-gradient-to-r from-amber-500 via-amber-600 to-yellow-600 hover:from-amber-600 hover:to-yellow-700 text-white font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-md hover:shadow-lg transition-all active:scale-[0.99] border border-amber-400/40 disabled:opacity-50"
+                >
+                  <DollarSign className="w-5 h-5 text-yellow-200" />
+                  <span>Scan Currency Note / Coin Now</span>
+                </button>
               </div>
             </div>
 

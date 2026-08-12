@@ -1103,14 +1103,14 @@ async def detect_currency_endpoint(request: CurrencyRequest):
         except Exception as e:
             print(f"Currency frame decoding error: {e}")
 
-    # Stage 1: Edge & Texture Density Pre-Check (Filter out empty/uniform frames)
+    # Stage 1: Edge & Texture Check
     has_valid_subject = True
     if HAS_CV and frame is not None:
         try:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            edges = cv2.Canny(gray, 50, 150)
+            edges = cv2.Canny(gray, 30, 100)
             edge_density = np.mean(edges) / 255.0
-            if edge_density < 0.008:  # Plain uniform background, no note present
+            if edge_density < 0.0005:  # Extremely blank image check
                 has_valid_subject = False
         except Exception:
             pass
