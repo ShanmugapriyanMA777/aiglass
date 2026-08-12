@@ -70,12 +70,22 @@ export default function LandingPage({ onStartDemo }: LandingPageProps) {
             <a href="#team" className="hover:text-primary-600 transition-colors">Team</a>
             <a href="#contact" className="hover:text-primary-600 transition-colors">Contact</a>
           </div>
-          <button
-            onClick={onStartDemo}
-            className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-primary-600 to-accent-500 text-white font-semibold text-sm shadow-lg shadow-primary-500/30 hover:shadow-primary-500/50 transition-all hover:scale-105"
-          >
-            Start Demo
-          </button>
+          <div className="flex items-center gap-3">
+            <a
+              href="/visionassist-guardian/login.html"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-4 py-2 rounded-xl border border-slate-200 text-slate-700 font-medium text-sm hover:border-primary-500 hover:text-primary-600 transition-all"
+            >
+              Guardian Login
+            </a>
+            <button
+              onClick={onStartDemo}
+              className="px-5 py-2 rounded-xl bg-gradient-to-r from-primary-600 to-accent-500 text-white font-semibold text-sm shadow-lg shadow-primary-500/30 hover:shadow-primary-500/50 transition-all hover:scale-105"
+            >
+              Start Demo
+            </button>
+          </div>
         </div>
       </nav>
 

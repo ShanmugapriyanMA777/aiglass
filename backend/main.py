@@ -1025,6 +1025,31 @@ try:
         except Exception as load_err:
             print(f"Error loading currency model: {load_err}")
 
+    def verify_currency_color_match(currency_name: str, frame) -> bool:
+        if not HAS_CV or frame is None:
+            return True
+        try:
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            tot_px = frame.shape[0] * frame.shape[1]
+            
+            masks = {
+                "₹2000 Indian Rupee Note": cv2.inRange(hsv, np.array([140, 40, 80]), np.array([175, 255, 255])),
+                "₹200 Indian Rupee Note": cv2.inRange(hsv, np.array([15, 80, 80]), np.array([35, 255, 255])),
+                "₹100 Indian Rupee Note": cv2.inRange(hsv, np.array([120, 25, 80]), np.array([155, 255, 255])),
+                "₹50 Indian Rupee Note": cv2.inRange(hsv, np.array([80, 60, 80]), np.array([115, 255, 255])),
+                "₹20 Indian Rupee Note": cv2.inRange(hsv, np.array([35, 50, 80]), np.array([75, 255, 255])),
+                "₹10 Indian Rupee Note": cv2.inRange(hsv, np.array([5, 40, 30]), np.array([22, 180, 140])),
+                "₹500 Indian Rupee Note": cv2.inRange(hsv, np.array([20, 15, 40]), np.array([65, 120, 180]))
+            }
+            
+            target_mask = masks.get(currency_name)
+            if target_mask is not None:
+                ratio = cv2.countNonZero(target_mask) / tot_px
+                return ratio >= 0.04
+        except Exception as e:
+            print(f"Color verification error: {e}")
+        return True
+
     def predict_currency_pytorch(frame):
         if GLOBAL_CURRENCY_MODEL is None or not GLOBAL_CURRENCY_CLASSES:
             return None
@@ -1042,13 +1067,17 @@ try:
             max_prob, max_idx = torch.max(probs, 0)
             
             conf = float(max_prob.item())
-            if conf >= 0.30:
+            if conf >= 0.65:
                 pred_meta = GLOBAL_CURRENCY_CLASSES[max_idx.item()]
-                return {
-                    "currency": pred_meta["currency"],
-                    "value_text": pred_meta["value_text"],
-                    "confidence": round(conf, 3)
-                }
+                currency_name = pred_meta["currency"]
+                
+                # Cross-verify color signature to prevent false positive classifications on non-currency objects
+                if verify_currency_color_match(currency_name, frame):
+                    return {
+                        "currency": currency_name,
+                        "value_text": pred_meta["value_text"],
+                        "confidence": round(conf, 3)
+                    }
         return None
 except Exception as e:
     print(f"PyTorch currency model setup note: {e}")
@@ -1059,192 +1088,208 @@ class CurrencyRequest(BaseModel):
 
 @app.post("/api/detect-currency")
 async def detect_currency_endpoint(request: CurrencyRequest):
-    import time, random, json
+    import time, json
     start_time = time.time()
 
-    # 1. Decode frame first
-    try:
-        frame_bytes = base64.b64decode(request.frame_base64)
-        if HAS_CV:
+    if not request.frame_base64 or len(request.frame_base64) < 100:
+        return {"detected": False, "currency": "", "value_text": "", "confidence": 0.0, "time_ms": 0}
+
+    frame = None
+    if HAS_CV:
+        try:
+            frame_bytes = base64.b64decode(request.frame_base64)
             np_arr = np.frombuffer(frame_bytes, np.uint8)
             frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        else:
-            frame = None
-    except Exception as e:
-        print(f"Frame decoding error: {e}")
-        frame = None
+        except Exception as e:
+            print(f"Currency frame decoding error: {e}")
 
-    # 2. Primary: Run custom trained PyTorch Deep Learning model if available
-    if frame is not None:
+    # Stage 1: Edge & Texture Density Pre-Check (Filter out empty/uniform frames)
+    has_valid_subject = True
+    if HAS_CV and frame is not None:
         try:
-            pytorch_res = predict_currency_pytorch(frame)
-            if pytorch_res:
-                elapsed_ms = int((time.time() - start_time) * 1000)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(gray, 50, 150)
+            edge_density = np.mean(edges) / 255.0
+            if edge_density < 0.008:  # Plain uniform background, no note present
+                has_valid_subject = False
+        except Exception:
+            pass
+
+    if not has_valid_subject:
+        return {"detected": False, "currency": "", "value_text": "", "confidence": 0.0, "time_ms": int((time.time() - start_time) * 1000)}
+
+    # Stage 2: EasyOCR Digits & Keyword Extraction
+    ocr_detected_currency = None
+    ocr_value_text = None
+    ocr_conf = 0.0
+
+    if HAS_CV and frame is not None and HAS_OCR:
+        try:
+            ocr_results = reader.readtext(frame)
+            ocr_text = " ".join([t[1].upper() for t in ocr_results if t[2] > 0.20])
+            
+            # Match Indian Rupee Note Denominations from OCR digits & text
+            if "2000" in ocr_text:
+                ocr_detected_currency, ocr_value_text, ocr_conf = "₹2000 Indian Rupee Note", "two thousand rupee note", 0.96
+            elif "500" in ocr_text:
+                ocr_detected_currency, ocr_value_text, ocr_conf = "₹500 Indian Rupee Note", "five hundred rupee note", 0.96
+            elif "200" in ocr_text:
+                ocr_detected_currency, ocr_value_text, ocr_conf = "₹200 Indian Rupee Note", "two hundred rupee note", 0.95
+            elif "100" in ocr_text:
+                ocr_detected_currency, ocr_value_text, ocr_conf = "₹100 Indian Rupee Note", "one hundred rupee note", 0.94
+            elif "50" in ocr_text:
+                ocr_detected_currency, ocr_value_text, ocr_conf = "₹50 Indian Rupee Note", "fifty rupee note", 0.93
+            elif "20" in ocr_text:
+                ocr_detected_currency, ocr_value_text, ocr_conf = "₹20 Indian Rupee Note", "twenty rupee note", 0.91
+            elif "10" in ocr_text:
+                ocr_detected_currency, ocr_value_text, ocr_conf = "₹10 Indian Rupee Note", "ten rupee note", 0.90
+            elif "RESERVE BANK" in ocr_text or "RUPEES" in ocr_text:
+                ocr_detected_currency, ocr_value_text, ocr_conf = "Indian Rupee Note", "Indian rupee note", 0.85
+            elif "DOLLAR" in ocr_text or "FEDERAL RESERVE" in ocr_text:
+                ocr_detected_currency, ocr_value_text, ocr_conf = "US Dollar Note", "US dollar note", 0.88
+            elif "EURO" in ocr_text:
+                ocr_detected_currency, ocr_value_text, ocr_conf = "Euro Note", "Euro note", 0.88
+
+            if ocr_detected_currency:
                 return {
                     "detected": True,
-                    "currency": pytorch_res["currency"],
-                    "value_text": pytorch_res["value_text"],
-                    "confidence": pytorch_res["confidence"],
-                    "time_ms": elapsed_ms
+                    "currency": ocr_detected_currency,
+                    "value_text": ocr_value_text,
+                    "confidence": ocr_conf,
+                    "time_ms": int((time.time() - start_time) * 1000)
                 }
-        except Exception as pt_err:
-            print(f"PyTorch model inference error: {pt_err}")
+        except Exception as ocr_err:
+            print(f"OCR Currency exception: {ocr_err}")
 
-    # 3. Secondary: Try Gemini Vision AI via OpenRouter if API key is present
+    # Stage 3: PyTorch Deep Learning Model Inference
+    pytorch_currency = None
+    pytorch_value = None
+    pytorch_conf = 0.0
+    if HAS_CV and frame is not None:
+        try:
+            pt_res = predict_currency_pytorch(frame)
+            if pt_res and pt_res.get("confidence", 0) >= 0.50:
+                pytorch_currency = pt_res["currency"]
+                pytorch_value = pt_res["value_text"]
+                pytorch_conf = pt_res["confidence"]
+        except Exception as pt_err:
+            print(f"PyTorch Currency exception: {pt_err}")
+
+    # Stage 4: HSV Color Signature Analysis for Bank Notes
+    hsv_currency = None
+    hsv_value = None
+    hsv_conf = 0.0
+    if HAS_CV and frame is not None:
+        try:
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            tot_px = frame.shape[0] * frame.shape[1]
+
+            magenta_mask = cv2.inRange(hsv, np.array([140, 50, 100]), np.array([170, 255, 255]))
+            yellow_mask = cv2.inRange(hsv, np.array([15, 100, 100]), np.array([35, 255, 255]))
+            violet_mask = cv2.inRange(hsv, np.array([125, 30, 100]), np.array([155, 255, 255]))
+            cyan_mask = cv2.inRange(hsv, np.array([85, 80, 100]), np.array([110, 255, 255]))
+            green_mask = cv2.inRange(hsv, np.array([35, 60, 100]), np.array([75, 255, 255]))
+            brown_mask = cv2.inRange(hsv, np.array([5, 50, 40]), np.array([20, 180, 140]))
+
+            ratios = {
+                "₹2000 Indian Rupee Note": (cv2.countNonZero(magenta_mask) / tot_px, "two thousand rupee note"),
+                "₹200 Indian Rupee Note": (cv2.countNonZero(yellow_mask) / tot_px, "two hundred rupee note"),
+                "₹100 Indian Rupee Note": (cv2.countNonZero(violet_mask) / tot_px, "one hundred rupee note"),
+                "₹50 Indian Rupee Note": (cv2.countNonZero(cyan_mask) / tot_px, "fifty rupee note"),
+                "₹20 Indian Rupee Note": (cv2.countNonZero(green_mask) / tot_px, "twenty rupee note"),
+                "₹10 Indian Rupee Note": (cv2.countNonZero(brown_mask) / tot_px, "ten rupee note"),
+            }
+
+            best_match = max(ratios.items(), key=lambda item: item[1][0])
+            if best_match[1][0] >= 0.12:  # Dominates at least 12% of frame
+                hsv_currency = best_match[0]
+                hsv_value = best_match[1][1]
+                hsv_conf = min(0.92, round(0.70 + best_match[1][0], 2))
+        except Exception as cv_err:
+            print(f"Color analysis exception: {cv_err}")
+
+    # Stage 5: Multi-Modal Consensus Decision
+    # If OCR detected a clear numerical denomination, prioritize OCR (text is definitive)
+    if ocr_detected_currency:
+        return {
+            "detected": True,
+            "currency": ocr_detected_currency,
+            "value_text": ocr_value_text,
+            "confidence": ocr_conf,
+            "time_ms": int((time.time() - start_time) * 1000)
+        }
+
+    # If PyTorch model is confident (>= 0.60) or matches HSV color signature
+    if pytorch_currency:
+        if pytorch_conf >= 0.60 or (hsv_currency == pytorch_currency):
+            return {
+                "detected": True,
+                "currency": pytorch_currency,
+                "value_text": pytorch_value,
+                "confidence": pytorch_conf,
+                "time_ms": int((time.time() - start_time) * 1000)
+            }
+
+    # If HSV color analysis is very high (>= 0.18 ratio)
+    if hsv_currency and hsv_conf >= 0.85:
+        return {
+            "detected": True,
+            "currency": hsv_currency,
+            "value_text": hsv_value,
+            "confidence": hsv_conf,
+            "time_ms": int((time.time() - start_time) * 1000)
+        }
+
+    # Stage 6: Cloud Vision Gemini Fallback if API key is present
     api_key = os.getenv("OPENROUTER_API_KEY")
-    if api_key and request.frame_base64:
+    if api_key:
         try:
             import requests
             headers = {
                 "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://visionassist.app",
-                "X-Title": "VisionAssist"
+                "Content-Type": "application/json"
             }
             prompt_text = (
-                "Analyze this image frame carefully for currency notes or coins (Indian Rupees ₹10, ₹20, ₹50, ₹100, ₹200, ₹500, ₹2000, US Dollars $, Euros €, British Pounds £, etc.). "
-                "Respond ONLY with a valid raw JSON object (no markdown, no code fences) in this exact format:\n"
-                '{"detected": true, "currency": "₹500 Indian Rupee Note", "value_text": "five hundred rupee note", "confidence": 0.96}\n'
-                "If NO currency note or coin is clearly visible, return:\n"
+                "Analyze this camera frame carefully for currency notes or coins (Indian Rupees ₹10, ₹20, ₹50, ₹100, ₹200, ₹500, ₹2000, US Dollars, Euros, etc.). "
+                "Respond ONLY with a valid raw JSON object: "
+                '{"detected": true, "currency": "₹500 Indian Rupee Note", "value_text": "five hundred rupee note", "confidence": 0.96} '
+                "If no currency is visible, return: "
                 '{"detected": false, "currency": "", "value_text": "", "confidence": 0.0}'
             )
             payload = {
                 "model": "google/gemini-2.5-flash",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt_text},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{request.frame_base64}"}}
-                        ]
-                    }
-                ],
-                "max_tokens": 300,
-                "temperature": 0.2,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{request.frame_base64}"}}
+                    ]
+                }],
+                "max_tokens": 200,
+                "temperature": 0.1,
                 "response_format": {"type": "json_object"}
             }
-            res = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=8)
+            res = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=7)
             if res.status_code == 200:
-                resp_json = res.json()
-                content = resp_json['choices'][0]['message']['content'].strip()
+                content = res.json()['choices'][0]['message']['content'].strip()
                 parsed = json.loads(content)
-                elapsed_ms = int((time.time() - start_time) * 1000)
                 if parsed.get("detected"):
                     return {
-                        "detected": bool(parsed.get("detected", False)),
+                        "detected": True,
                         "currency": str(parsed.get("currency", "")),
                         "value_text": str(parsed.get("value_text", "")),
-                        "confidence": float(parsed.get("confidence", 0.0)),
-                        "time_ms": elapsed_ms
+                        "confidence": float(parsed.get("confidence", 0.9)),
+                        "time_ms": int((time.time() - start_time) * 1000)
                     }
         except Exception as e:
-            print(f"Gemini currency vision detection failed: {e}")
+            print(f"Gemini currency call failed: {e}")
 
-    # 2. Fallback: Offline CV + EasyOCR + Color Analysis Pipeline
-    try:
-        frame_bytes = base64.b64decode(request.frame_base64)
-        if HAS_CV:
-            np_arr = np.frombuffer(frame_bytes, np.uint8)
-            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        else:
-            frame = None
-    except Exception as e:
-        print(f"Frame decoding error: {e}")
-        frame = None
-
-    if frame is not None:
-        detected_currency = None
-        value_text = None
-        confidence = 0.0
-
-        # a. OCR text extraction for currency markers
-        ocr_texts = []
-        if HAS_OCR:
-            try:
-                ocr_raw = reader.readtext(frame)
-                ocr_texts = [text.upper().strip() for (_, text, conf) in ocr_raw if conf > 0.2]
-            except Exception as ocr_err:
-                print(f"EasyOCR in currency failed: {ocr_err}")
-
-        joined_ocr = " ".join(ocr_texts)
-
-        # Check for Indian Rupee denominations in OCR text
-        if "2000" in joined_ocr:
-            detected_currency, value_text = "₹2000 Indian Rupee Note", "two thousand rupee note"
-            confidence = 0.95
-        elif "500" in joined_ocr:
-            detected_currency, value_text = "₹500 Indian Rupee Note", "five hundred rupee note"
-            confidence = 0.95
-        elif "200" in joined_ocr:
-            detected_currency, value_text = "₹200 Indian Rupee Note", "two hundred rupee note"
-            confidence = 0.94
-        elif "100" in joined_ocr:
-            detected_currency, value_text = "₹100 Indian Rupee Note", "one hundred rupee note"
-            confidence = 0.93
-        elif "50" in joined_ocr:
-            detected_currency, value_text = "₹50 Indian Rupee Note", "fifty rupee note"
-            confidence = 0.92
-        elif "20" in joined_ocr:
-            detected_currency, value_text = "₹20 Indian Rupee Note", "twenty rupee note"
-            confidence = 0.90
-        elif "10" in joined_ocr:
-            detected_currency, value_text = "₹10 Indian Rupee Note", "ten rupee note"
-            confidence = 0.88
-        elif any(k in joined_ocr for k in ["RESERVE BANK", "RUPEES", "BHARATIYA RESERVE"]):
-            detected_currency, value_text = "Indian Rupee Note", "Indian rupee note"
-            confidence = 0.80
-        elif any(k in joined_ocr for k in ["FEDERAL RESERVE", "ONE DOLLAR", "FIVE DOLLARS", "TEN DOLLARS", "TWENTY DOLLARS", "ONE HUNDRED DOLLARS"]):
-            detected_currency, value_text = "US Dollar Note", "US dollar note"
-            confidence = 0.85
-
-        # b. HSV Color analysis fallback if OCR was inconclusive
-        if not detected_currency and HAS_CV:
-            try:
-                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-                tot_px = frame.shape[0] * frame.shape[1]
-
-                # Color definitions for Indian bank notes
-                magenta_mask = cv2.inRange(hsv, np.array([140, 50, 100]), np.array([170, 255, 255]))
-                yellow_mask = cv2.inRange(hsv, np.array([15, 100, 100]), np.array([35, 255, 255]))
-                violet_mask = cv2.inRange(hsv, np.array([125, 30, 100]), np.array([155, 255, 255]))
-                cyan_mask = cv2.inRange(hsv, np.array([85, 80, 100]), np.array([110, 255, 255]))
-                green_mask = cv2.inRange(hsv, np.array([35, 60, 100]), np.array([75, 255, 255]))
-                brown_mask = cv2.inRange(hsv, np.array([5, 50, 40]), np.array([20, 180, 140]))
-
-                ratios = {
-                    "₹2000 Indian Rupee Note": (cv2.countNonZero(magenta_mask) / tot_px, "two thousand rupee note"),
-                    "₹200 Indian Rupee Note": (cv2.countNonZero(yellow_mask) / tot_px, "two hundred rupee note"),
-                    "₹100 Indian Rupee Note": (cv2.countNonZero(violet_mask) / tot_px, "one hundred rupee note"),
-                    "₹50 Indian Rupee Note": (cv2.countNonZero(cyan_mask) / tot_px, "fifty rupee note"),
-                    "₹20 Indian Rupee Note": (cv2.countNonZero(green_mask) / tot_px, "twenty rupee note"),
-                    "₹10 Indian Rupee Note": (cv2.countNonZero(brown_mask) / tot_px, "ten rupee note"),
-                }
-
-                best_match = max(ratios.items(), key=lambda item: item[1][0])
-                if best_match[1][0] > 0.15: # Dominates at least 15% of frame
-                    detected_currency = best_match[0]
-                    value_text = best_match[1][1]
-                    confidence = min(0.92, round(0.70 + best_match[1][0], 2))
-            except Exception as cv_err:
-                print(f"Color analysis in currency failed: {cv_err}")
-
-        elapsed_ms = int((time.time() - start_time) * 1000)
-        if detected_currency:
-            return {
-                "detected": True,
-                "currency": detected_currency,
-                "value_text": value_text,
-                "confidence": confidence,
-                "time_ms": elapsed_ms
-            }
-
-    elapsed_ms = int((time.time() - start_time) * 1000)
     return {
         "detected": False,
         "currency": "",
         "value_text": "",
         "confidence": 0.0,
-        "time_ms": elapsed_ms
+        "time_ms": int((time.time() - start_time) * 1000)
     }
 
 if __name__ == "__main__":

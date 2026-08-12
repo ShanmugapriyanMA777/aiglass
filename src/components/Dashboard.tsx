@@ -2065,6 +2065,23 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
                     ))}
                   </div>
                 )}
+                {currencyModeActive && (
+                  <div className="absolute top-3 right-3 z-30 flex flex-col items-end gap-2">
+                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-500/90 text-white text-xs font-bold shadow-lg backdrop-blur-md border border-amber-300/40 animate-pulse">
+                      <DollarSign className="w-4 h-4" />
+                      <span>Currency Scanner: Active</span>
+                    </div>
+                    {currencyData && currencyData.detected && (
+                      <div className="p-3 rounded-xl bg-slate-900/90 text-white border border-amber-500/50 shadow-2xl backdrop-blur-md max-w-xs text-right animate-bounce">
+                        <span className="block text-[10px] text-amber-400 font-bold uppercase tracking-wider">Detected Note / Coin</span>
+                        <p className="text-sm font-black text-amber-300 mt-0.5">{currencyData.currency}</p>
+                        <span className="inline-block mt-1 px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 text-[10px] font-bold border border-emerald-500/30">
+                          {Math.round((currencyData.confidence || 0.9) * 100)}% Confidence
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
                 {analyzing && (
                   <div className="absolute bottom-3 right-3 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900/80 backdrop-blur-sm z-20 border border-slate-800">
                     <Loader2 className="w-4 h-4 text-accent-400 animate-spin" />
