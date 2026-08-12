@@ -13,6 +13,7 @@ import { voiceEngine, VoicePriority } from '../lib/VoiceEngine';
 import { analyzeFrame, drawBoundingBoxes, getLocalModel, type VisionResult, askGemini, generateVoiceMessage, detectCurrency, type CurrencyDetectionResult } from '../lib/detection';
 import { speak, stopSpeaking, configureSpeech, SpeechRecognitionHelper, isSpeaking } from '../lib/speech';
 import { supabase, type AppSettings, type EmergencyContact, type DetectionRecord, type ActivityLogEntry, type DetectionType } from '../lib/supabase';
+import { syncAIActivity, syncAlert, syncDeviceStatus, syncLocation } from '../lib/guardianSync';
 import MapPanel from './MapPanel';
 import { searchPlaces, getWalkingRoute, getDistanceMeters, type NavigationStep } from '../lib/maps';
 import { getItem, setItem } from '../lib/storage';
@@ -890,6 +891,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
           conf: result.confidence
         }, ...prev].slice(0, 10));
         addHistory('currency', result.currency, result.confidence, 'Currency detected');
+        syncAIActivity('CURRENCY', `Recognized ${result.currency} (${Math.round((result.confidence || 0.9) * 100)}% confidence)`);
       } else {
         speakIfNotMuted("No currency note or coin detected. Please adjust lighting and hold note straight.");
       }
@@ -1027,6 +1029,8 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         const message = `EMERGENCY: VisionAssist user needs help. Location: ${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
         try {
           await supabase.from('activity_log').insert({ event: 'sos', details: { message, location: { latitude, longitude } } });
+          syncAlert('SOS', 'CRITICAL', message, latitude, longitude);
+          syncLocation(latitude, longitude, 'Emergency Location', 0, 0);
         } catch (e) {
           console.warn('Failed to log SOS activity to Supabase:', e);
         }
