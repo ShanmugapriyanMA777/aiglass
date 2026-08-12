@@ -13,13 +13,18 @@ interface GuardianPortalProps {
 }
 
 export default function GuardianPortal({ onExitPortal }: GuardianPortalProps) {
-  const [user, setUser] = useState<{ name: string; email: string; id: string } | null>(() => {
+  const [user, setUser] = useState<{ name: string; email: string; id: string }>(() => {
     try {
       const saved = localStorage.getItem('vg_guardian_user');
-      return saved ? JSON.parse(saved) : null;
-    } catch {
-      return null;
-    }
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    const defaultDemo = {
+      name: 'Dr. Sarah Connor',
+      email: 'sarah.connor@visionassist.ai',
+      id: 'usr_demo_guardian'
+    };
+    localStorage.setItem('vg_guardian_user', JSON.stringify(defaultDemo));
+    return defaultDemo;
   });
 
   const [activeTab, setActiveTab] = useState<'dashboard' | 'tracking' | 'alerts' | 'activity' | 'reports' | 'settings'>('dashboard');
