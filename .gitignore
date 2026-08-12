@@ -25,3 +25,4 @@ __pycache__/
 *.pyc
 runs/
 yolov8n.pt
+backend/home_objects_best.pt
