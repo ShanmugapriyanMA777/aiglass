@@ -16,6 +16,7 @@ export default function MapPanel({
   routeCoordinates,
   simulatedUserLocation,
   mapType = 'standard',
+  accuracyMeters,
 }: MapPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<any>(null);

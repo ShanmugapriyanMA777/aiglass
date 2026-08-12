@@ -5,13 +5,13 @@ import {
   Scan, Eye, Palette, DollarSign, MapPin, AlertTriangle,
   Navigation, Settings, BarChart3, Home, X, Download, Trash2,
   Play, Square, Clock, TrendingUp, Zap, Brain, Target,
-  CheckCircle2, AlertCircle, Loader2, ScanFace, RefreshCw, Shield, Glasses, BrainCircuit
+  CheckCircle2, AlertCircle, Loader2, ScanFace, RefreshCw, Shield, Glasses, BrainCircuit, Radio
 } from 'lucide-react';
 
-import { voiceEngine, VoicePriority } from '../lib/VoiceEngine';
+import { voiceEngine } from '../lib/VoiceEngine';
 
 import { analyzeFrame, drawBoundingBoxes, getLocalModel, type VisionResult, askGemini, generateVoiceMessage, detectCurrency, type CurrencyDetectionResult } from '../lib/detection';
-import { speak, stopSpeaking, configureSpeech, SpeechRecognitionHelper, isSpeaking } from '../lib/speech';
+import { stopSpeaking, configureSpeech, SpeechRecognitionHelper, isSpeaking } from '../lib/speech';
 import { supabase, type AppSettings, type EmergencyContact, type DetectionRecord, type ActivityLogEntry, type DetectionType } from '../lib/supabase';
 import { syncAIActivity, syncAlert, syncDeviceStatus, syncLocation } from '../lib/guardianSync';
 import { LocationEngine, type TrustedLocation } from '../lib/LocationEngine';
@@ -100,6 +100,24 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
   const [currencyHistory, setCurrencyHistory] = useState<Array<{time: string, text: string, conf: number}>>([]);
   const lastSpokenCurrency = useRef<string>('');
   const currencyIntervalRef = useRef<number>(0);
+
+  // Street Object Awareness States
+  const [streetAwarenessOn, setStreetAwarenessOn] = useState<boolean>(true);
+  const [streetObjects, setStreetObjects] = useState<Array<{
+    class: string;
+    position: string;
+    distance: string;
+    distance_meters: number;
+    danger: string;
+    confidence: number;
+    should_announce: boolean;
+    announcement: string;
+    bbox: number[];
+  }>>([]);
+  const streetAwarenessRef = useRef(true);
+  useEffect(() => {
+    streetAwarenessRef.current = streetAwarenessOn;
+  }, [streetAwarenessOn]);
   
   // AI Companion States
   const [aiHistory, setAiHistory] = useState<Array<{role: string, content: string}>>([]);
@@ -308,6 +326,28 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     if (result.scene_updated && result.scene_description) {
       voiceEngine.general(result.scene_description);
       setSceneText(result.scene_description);
+    }
+
+    // Street Object Awareness processing
+    if (result.street_objects && result.street_objects.length > 0) {
+      setStreetObjects(result.street_objects);
+
+      // Voice announce objects if street awareness mode is on
+      if (streetAwarenessRef.current) {
+        result.street_objects.forEach((obj: any) => {
+          if (obj.should_announce && obj.announcement) {
+            if (obj.danger === 'high') {
+              voiceEngine.safety(obj.announcement);
+            } else if (obj.danger === 'medium') {
+              voiceEngine.general(obj.announcement);
+            } else {
+              voiceEngine.general(obj.announcement);
+            }
+          }
+        });
+      }
+    } else {
+      setStreetObjects([]);
     }
   }, []);
 
@@ -1213,7 +1253,17 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
             const model = await getLocalModel();
             const predictions = await model.detect(videoRef.current);
             
-            drawBoundingBoxes(predictions, canvasRef.current, videoRef.current, settings.confidence_threshold);
+            drawBoundingBoxes(
+              predictions,
+              canvasRef.current,
+              videoRef.current,
+              settings.confidence_threshold,
+              {
+                trafficLightColor: trafficColor,
+                zebraState: zebraCrossingState,
+                vehicleOnCrossing
+              }
+            );
 
             if (predictions.length > 0) {
               const mapped = predictions.map((pred: any) => {
@@ -2078,17 +2128,36 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
                   { id: 'currency', icon: DollarSign, label: 'Currency', action: handleCurrency },
                   { id: 'face', icon: ScanFace, label: 'Face', action: handleFace },
                   { id: 'voice', icon: Mic, label: listening ? 'Listening...' : settings.voice_automation ? 'Auto Voice' : 'Voice', action: handleVoiceCommand },
+                  { id: 'street', icon: Navigation, label: streetAwarenessOn ? 'Street: ON' : 'Street: OFF', action: () => {
+                    setStreetAwarenessOn(prev => {
+                      const newVal = !prev;
+                      if (newVal) {
+                        voiceEngine.command('Street awareness mode activated. I will announce nearby objects as we walk.');
+                      } else {
+                        voiceEngine.command('Street awareness mode paused.');
+                      }
+                      return newVal;
+                    });
+                  }},
                 ].map((f) => (
                   <button
                     key={f.id}
                     onClick={f.action}
                     disabled={!cameraOn || analyzing}
                     className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all disabled:opacity-40 ${
-                      activeFeature === f.id ? 'bg-primary-50 border-primary-300' : 'border-slate-200 hover:border-primary-200 hover:bg-primary-50/50'
+                      f.id === 'street'
+                        ? (streetAwarenessOn ? 'bg-success-50 border-success-300 ring-2 ring-success-200' : 'border-slate-200 hover:border-primary-200 hover:bg-primary-50/50')
+                        : (activeFeature === f.id ? 'bg-primary-50 border-primary-300' : 'border-slate-200 hover:border-primary-200 hover:bg-primary-50/50')
                     }`}
                   >
-                    <f.icon className={`w-5 h-5 ${activeFeature === f.id ? 'text-primary-600' : 'text-slate-500'}`} />
-                    <span className="text-xs font-medium text-slate-600">{f.label}</span>
+                    <f.icon className={`w-5 h-5 ${
+                      f.id === 'street'
+                        ? (streetAwarenessOn ? 'text-success-600 animate-pulse' : 'text-slate-500')
+                        : (activeFeature === f.id ? 'text-primary-600' : 'text-slate-500')
+                    }`} />
+                    <span className={`text-xs font-medium ${
+                      f.id === 'street' && streetAwarenessOn ? 'text-success-700 font-bold' : 'text-slate-600'
+                    }`}>{f.label}</span>
                   </button>
                 ))}
               </div>
@@ -2625,6 +2694,92 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
                   )}
                 </div>
               </div>
+            </div>
+
+            {/* Card 5: Live Street Objects */}
+            <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 space-y-2 hover:shadow-md transition-shadow">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                  <Navigation className="w-4 h-4 text-primary-600" /> Live Street Objects
+                  <span className={`ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                    streetAwarenessOn ? 'bg-success-100 text-success-700 border border-success-200' : 'bg-slate-200 text-slate-500 border border-slate-300'
+                  }`}>
+                    {streetAwarenessOn ? 'ACTIVE' : 'PAUSED'}
+                  </span>
+                </h4>
+                <span className="text-[10px] font-mono text-slate-400">
+                  {streetObjects.length} object{streetObjects.length !== 1 ? 's' : ''} detected
+                </span>
+              </div>
+
+              {streetObjects.length > 0 ? (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
+                  {streetObjects.map((obj, idx) => {
+                    const iconMap: Record<string, string> = {
+                      car: '🚗', bus: '🚌', truck: '🚛', motorcycle: '🏍️',
+                      bicycle: '🚲', person: '🚶', dog: '🐕', cat: '🐈',
+                      bench: '🪑', 'fire hydrant': '🧯', pole: '🔦',
+                      'stop sign': '🛑', 'parking meter': '🅿️',
+                      umbrella: '☂️', backpack: '🎒', handbag: '👜',
+                      suitcase: '🧳', 'traffic light': '🚦'
+                    };
+                    const dangerColors: Record<string, string> = {
+                      high: 'border-error-300 bg-error-50',
+                      medium: 'border-warning-300 bg-warning-50',
+                      low: 'border-slate-200 bg-white'
+                    };
+                    const distColors: Record<string, string> = {
+                      'very close': 'bg-error-500 text-white',
+                      close: 'bg-warning-500 text-white',
+                      medium: 'bg-primary-500 text-white',
+                      far: 'bg-slate-300 text-slate-700'
+                    };
+                    const posArrow: Record<string, string> = {
+                      left: '⬅️', center: '⬆️', right: '➡️'
+                    };
+
+                    return (
+                      <div
+                        key={`${obj.class}-${obj.position}-${idx}`}
+                        className={`rounded-xl border-2 p-2.5 flex flex-col items-center gap-1 transition-all duration-300 hover:shadow-md ${
+                          dangerColors[obj.danger] || 'border-slate-200 bg-white'
+                        } ${obj.should_announce ? 'animate-pulse ring-2 ring-primary-300' : ''}`}
+                      >
+                        <span className="text-2xl">{iconMap[obj.class] || '📦'}</span>
+                        <span className="text-[11px] font-bold text-slate-800 capitalize text-center leading-tight">
+                          {obj.class}
+                        </span>
+                        <div className="flex items-center gap-1">
+                          <span className="text-sm">{posArrow[obj.position] || '⬆️'}</span>
+                          <span className="text-[10px] text-slate-500 font-medium capitalize">{obj.position}</span>
+                        </div>
+                        <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full ${
+                          distColors[obj.distance] || 'bg-slate-200 text-slate-600'
+                        }`}>
+                          {obj.distance} ({obj.distance_meters}m)
+                        </span>
+                        <div className="w-full bg-slate-200 rounded-full h-1 mt-0.5">
+                          <div
+                            className={`h-1 rounded-full transition-all duration-500 ${
+                              obj.danger === 'high' ? 'bg-error-500' :
+                              obj.danger === 'medium' ? 'bg-warning-500' : 'bg-success-500'
+                            }`}
+                            style={{ width: `${Math.round(obj.confidence * 100)}%` }}
+                          />
+                        </div>
+                        <span className="text-[8px] text-slate-400 font-mono">
+                          {Math.round(obj.confidence * 100)}%
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="flex items-center justify-center py-6 text-slate-400 text-sm">
+                  <Navigation className="w-4 h-4 mr-2 animate-spin" />
+                  Scanning for street objects...
+                </div>
+              )}
             </div>
 
             {/* Bottom Bar: Voice Queue indicator */}

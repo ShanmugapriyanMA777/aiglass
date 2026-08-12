@@ -225,7 +225,7 @@ def build_ocr_announcement(text: str, category: str, direction: str, nav_active:
         return f"I read the text: {text}, {dir_phrase}."
 
 def run_ocr(frame, frame_width, nav_active=False, destination_number="", lang="en-US"):
-    if not HAS_OCR:
+    if not HAS_OCR or frame is None:
         return run_ocr_simulated(frame_width, nav_active, destination_number, lang)
 
     results = reader.readtext(frame)
@@ -354,7 +354,7 @@ def process_traffic_light(frame, yolo_boxes) -> dict:
     global traffic_state
     now = time.time()
 
-    if not HAS_CV:
+    if not HAS_CV or frame is None:
         # Simulate traffic light changing colors: Red (15s) -> Green (15s) -> Yellow (5s)
         cycle = int(now) % 35
         if cycle < 15:
@@ -438,7 +438,7 @@ def detect_zebra_crossing(frame, yolo_boxes) -> dict:
     global zebra_state
     now = time.time()
 
-    if not HAS_CV:
+    if not HAS_CV or frame is None:
         # Simulate zebra crossing approaching, at crossing, and clear
         cycle = int(now / 10) % 3
         if cycle == 0:
@@ -465,6 +465,9 @@ def detect_zebra_crossing(frame, yolo_boxes) -> dict:
             "should_announce": should_announce
         }
 
+    alternations = 0
+    bands = []
+    height = frame.shape[0] if frame is not None else 480
     try:
         height, width = frame.shape[:2]
         roi = frame[height//2:, :]  # Focus lower half of frame
