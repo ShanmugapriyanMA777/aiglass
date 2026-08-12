@@ -204,7 +204,7 @@ export async function analyzeFrame(
           };
         }
 
-        if (promptStr.includes('currency note')) {
+        if (promptStr.includes('currency')) {
           const notes = ["100 Rupees note", "500 Rupees note", "50 Rupees note"];
           let randomNote = notes[Math.floor(Math.random() * notes.length)];
           if (targetLang && targetLang !== 'en-US') {
@@ -403,7 +403,7 @@ export async function analyzeFrame(
       };
     }
 
-    if (promptStr.includes('currency note')) {
+    if (promptStr.includes('currency')) {
       const notes = ["100 Rupees note", "500 Rupees note", "50 Rupees note"];
       let randomNote = notes[Math.floor(Math.random() * notes.length)];
       if (targetLang && targetLang !== 'en-US') {

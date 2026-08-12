@@ -832,19 +832,28 @@ try:
             x = self.fc2(x)
             return x
 
+    # Pre-load PyTorch currency model globally in memory
+    GLOBAL_CURRENCY_MODEL = None
+    GLOBAL_CURRENCY_CLASSES = []
+
+    model_path = os.path.join(os.path.dirname(__file__), "currency_model.pth")
+    classes_path = os.path.join(os.path.dirname(__file__), "currency_classes.json")
+    
+    if os.path.exists(model_path) and os.path.exists(classes_path):
+        try:
+            with open(classes_path, "r") as f:
+                GLOBAL_CURRENCY_CLASSES = json.load(f)
+            loaded_model = CurrencyCNN(num_classes=len(GLOBAL_CURRENCY_CLASSES))
+            loaded_model.load_state_dict(torch.load(model_path, map_location=torch.device("cpu")))
+            loaded_model.eval()
+            GLOBAL_CURRENCY_MODEL = loaded_model
+            print(f"Successfully loaded pre-trained PyTorch currency model into memory ({len(GLOBAL_CURRENCY_CLASSES)} classes).")
+        except Exception as load_err:
+            print(f"Error loading currency model: {load_err}")
+
     def predict_currency_pytorch(frame):
-        model_path = os.path.join(os.path.dirname(__file__), "currency_model.pth")
-        classes_path = os.path.join(os.path.dirname(__file__), "currency_classes.json")
-        
-        if not (os.path.exists(model_path) and os.path.exists(classes_path)):
+        if GLOBAL_CURRENCY_MODEL is None or not GLOBAL_CURRENCY_CLASSES:
             return None
-
-        with open(classes_path, "r") as f:
-            classes_meta = json.load(f)
-
-        model = CurrencyCNN(num_classes=len(classes_meta))
-        model.load_state_dict(torch.load(model_path, map_location=torch.device("cpu")))
-        model.eval()
 
         img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img_resized = cv2.resize(img_rgb, (128, 128)).astype(np.float32) / 255.0
@@ -854,13 +863,13 @@ try:
         img_tensor = torch.tensor(np.transpose(img_norm, (2, 0, 1))).unsqueeze(0)
 
         with torch.no_grad():
-            outputs = model(img_tensor)
+            outputs = GLOBAL_CURRENCY_MODEL(img_tensor)
             probs = F.softmax(outputs, dim=1)[0]
             max_prob, max_idx = torch.max(probs, 0)
             
             conf = float(max_prob.item())
-            if conf >= 0.55:
-                pred_meta = classes_meta[max_idx.item()]
+            if conf >= 0.30:
+                pred_meta = GLOBAL_CURRENCY_CLASSES[max_idx.item()]
                 return {
                     "currency": pred_meta["currency"],
                     "value_text": pred_meta["value_text"],
