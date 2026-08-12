@@ -481,18 +481,28 @@ export async function analyzeFrame(
   }
 }
 
+export const HARM_OBJECTS = ['knife', 'scissors', 'blade', 'sharp object', 'weapon', 'gun', 'dagger', 'sword', 'broken glass', 'fire', 'cleaver', 'razor'];
+
+export function isHarmfulObject(label: string): boolean {
+  const l = (label || '').toLowerCase();
+  return HARM_OBJECTS.some(h => l.includes(h));
+}
+
 export function generateVoiceMessage(obj: DetectedObject, lang?: string): string {
   const shortLang = lang ? lang.split('-')[0].toLowerCase() : 'en';
+  const isHarm = isHarmfulObject(obj.class);
 
   if (shortLang === 'ta') {
     const objNames: Record<string, string> = {
       person: 'நபர்', chair: 'நாற்காலி', laptop: 'லேப்டாப்', backpack: 'பை',
-      bottle: 'பாட்டில்', cup: 'கப்', 'cell phone': 'தொலைபேசி', dog: 'நாய்',
-      cat: 'பூனை', car: 'கார்', bus: 'பேருந்து', truck: 'லாரி',
+      bottle: 'பாட்டில்', cup: 'கப்', 'cell phone': 'கைப்பேசி', phone: 'தொலைபேசி',
+      dog: 'நாய்', cat: 'பூனை', car: 'கார்', bus: 'பேருந்து', truck: 'லாரி',
       motorcycle: 'மோட்டார் சைக்கிள்', bicycle: 'மிதிவண்டி', book: 'புத்தகம்',
       table: 'மேஜை', tv: 'தொலைக்காட்சி', couch: 'சோபா', bed: 'கட்டில்',
       umbrella: 'குடை', clock: 'கடிகாரம்', 'stop sign': 'நிறுத்த அடையாளம்',
-      'traffic light': 'போக்குவரத்து விளக்கு', bench: 'பெஞ்ச்'
+      'traffic light': 'போக்குவரத்து விளக்கு', bench: 'பெஞ்ச்', board: 'போர்டு',
+      whiteboard: 'வெள்ளை போர்டு', blackboard: 'கரும்பலகை', projector: 'ப்ரொஜெக்டர்',
+      knife: 'கத்தி ⚠️', scissors: 'கத்தரிக்கோல் ⚠️'
     };
     const posMap: Record<string, string> = {
       center: 'உங்கள் நேர் முன்',
@@ -504,6 +514,10 @@ export function generateVoiceMessage(obj: DetectedObject, lang?: string): string
     const dist = obj.distanceMeters <= 1
       ? 'மிக அருகில் உள்ளது!'
       : `சுமார் ${obj.distanceMeters} மீட்டர் தொலைவில் உள்ளது.`;
+
+    if (isHarm) {
+      return `⚠️ ஆபத்து எச்சரிக்கை! ${pos} ஒரு ஆபத்தான பொருள் ${name} ${dist}! கவனமாக விலகி செல்லவும்!`;
+    }
     return `${pos} ஒரு ${name} ${dist}`;
   }
 
@@ -511,7 +525,9 @@ export function generateVoiceMessage(obj: DetectedObject, lang?: string): string
     const objNames: Record<string, string> = {
       person: 'व्यक्ति', chair: 'कुर्सी', laptop: 'लैपटॉप', backpack: 'बैग',
       bottle: 'बोतल', cup: 'कप', dog: 'कुत्ता', cat: 'बिल्ली',
-      car: 'कार', table: 'मेज़', book: 'किताब'
+      car: 'कार', table: 'मेज़', book: 'किताब', bench: 'बेंच',
+      board: 'बोर्ड', projector: 'प्रोजेक्टर', 'cell phone': 'मोबाइल फोन',
+      phone: 'फोन', knife: 'चाकू ⚠️', scissors: 'कैंची ⚠️'
     };
     const posMap: Record<string, string> = {
       center: 'आपके सामने', left: 'आपके बाएं', right: 'आपके दाएं'
@@ -521,12 +537,20 @@ export function generateVoiceMessage(obj: DetectedObject, lang?: string): string
     const dist = obj.distanceMeters <= 1
       ? 'बहुत पास है!'
       : `लगभग ${obj.distanceMeters} मीटर दूर है।`;
+
+    if (isHarm) {
+      return `⚠️ खतरे की चेतावनी! आपके ${pos} एक खतरनाक वस्तु ${name} ${dist}! दूर रहें और सावधान रहें!`;
+    }
     return `${pos} एक ${name} ${dist}`;
   }
 
   // English default
   const posText = obj.position === 'center' ? 'right in front of you' : `on your ${obj.position}`;
   const distText = obj.distanceMeters <= 1 ? "and it's very close!" : `about ${obj.distanceMeters} meters away.`;
+
+  if (isHarm) {
+    return `⚠️ CRITICAL DANGER: Harm causing object detected! A ${obj.class} is ${posText}, ${distText} Please exercise extreme caution!`;
+  }
   return `I see a ${obj.class} ${posText}, ${distText}`;
 }
 
@@ -559,13 +583,16 @@ export function drawBoundingBoxes(
   const scaleX = rect.width / videoWidth;
   const scaleY = rect.height / videoHeight;
 
-  // Street Danger Color Helper
+  // Street & Harm Danger Color Helper
   const getStreetColor = (label: string) => {
     const l = (label || '').toLowerCase();
-    if (['car', 'bus', 'truck', 'motorcycle'].includes(l)) {
+    if (isHarmfulObject(l)) {
+      return { border: '#dc2626', fill: '#dc2626', shadow: 'rgba(220, 38, 38, 0.8)', text: '⚠️ DANGER HARM' }; // Crimson Danger Harm
+    }
+    if (['car', 'bus', 'truck', 'motorcycle'].some(v => l.includes(v))) {
       return { border: '#ef4444', fill: '#ef4444', shadow: 'rgba(239, 68, 68, 0.4)', text: 'HIGH DANGER' }; // High Danger Red
     }
-    if (['bicycle', 'stop sign', 'fire hydrant', 'pole', 'parking meter', 'traffic light'].includes(l)) {
+    if (['bicycle', 'stop sign', 'fire hydrant', 'pole', 'parking meter', 'traffic light', 'projector', 'board'].some(c => l.includes(c))) {
       return { border: '#f59e0b', fill: '#f59e0b', shadow: 'rgba(245, 158, 11, 0.4)', text: 'CAUTION' }; // Medium Danger Amber
     }
     return { border: '#10b981', fill: '#10b981', shadow: 'rgba(16, 185, 129, 0.4)', text: 'INFO' }; // Low Danger Emerald Green

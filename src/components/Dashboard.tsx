@@ -10,7 +10,7 @@ import {
 
 import { voiceEngine } from '../lib/VoiceEngine';
 
-import { analyzeFrame, drawBoundingBoxes, getLocalModel, type VisionResult, askGemini, generateVoiceMessage, detectCurrency, type CurrencyDetectionResult } from '../lib/detection';
+import { analyzeFrame, drawBoundingBoxes, getLocalModel, type VisionResult, askGemini, generateVoiceMessage, detectCurrency, type CurrencyDetectionResult, isHarmfulObject } from '../lib/detection';
 import { stopSpeaking, configureSpeech, SpeechRecognitionHelper, isSpeaking } from '../lib/speech';
 import { supabase, type AppSettings, type EmergencyContact, type DetectionRecord, type ActivityLogEntry, type DetectionType } from '../lib/supabase';
 import { syncAIActivity, syncAlert, syncDeviceStatus, syncLocation } from '../lib/guardianSync';
@@ -67,6 +67,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
   const [trafficConfirmed, setTrafficConfirmed] = useState<boolean>(false);
   const [zebraCrossingState, setZebraCrossingState] = useState<string>('NONE');
   const [vehicleOnCrossing, setVehicleOnCrossing] = useState<boolean>(false);
+  const [harmAlert, setHarmAlert] = useState<{ detected: boolean; object: string; message: string } | null>(null);
   const [sceneActivePulse, setSceneActivePulse] = useState<boolean>(false);
   
   const [voiceSpeaking, setVoiceSpeaking] = useState<boolean>(false);
@@ -1041,19 +1042,32 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     setActiveFeature('objects');
     setAnalyzing(true);
     setError('');
-    speakIfNotMuted('Let me see what objects are around us.');
+    speakIfNotMuted('Analyzing surrounding objects...');
     try {
       const result = await analyzeFrame(
         videoRef.current,
-        'Identify all key objects in this image. Respond with a JSON object containing the "objects" array with class, confidence, position, and distance. Respond ONLY in the requested JSON format.',
+        'Identify all key objects in this image including bench, board, whiteboard, projector, phone, knife, scissors, and any harm-causing items. Respond with a JSON object containing the "objects" array with class, confidence, position, and distance. Respond ONLY in the requested JSON format.',
         settings.voice_lang
       );
       if (result.objects && result.objects.length > 0) {
-        speakIfNotMuted(`Detected ${result.objects.length} objects.`);
+        let harmFound = false;
         result.objects.forEach((obj) => {
+          if (isHarmfulObject(obj.class)) {
+            harmFound = true;
+            setHarmAlert({
+              detected: true,
+              object: obj.class,
+              message: `⚠️ CRITICAL HARM WARNING: ${obj.class.toUpperCase()} DETECTED!`
+            });
+            syncAlert('HARM_DETECTION', 'CRITICAL', `Harm causing object detected: ${obj.class}`, 0, 0);
+          }
           const msg = generateVoiceMessage(obj, settings.voice_lang);
           voiceEngine.general(msg);
         });
+
+        if (!harmFound) {
+          speakIfNotMuted(`Detected ${result.objects.length} objects.`);
+        }
         addHistory('object', `Detected ${result.objects.length} objects`, null, 'Objects detected');
       } else {
         speakIfNotMuted('No objects detected.');
@@ -2063,6 +2077,18 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
                         {d.class} · {d.distance} · {d.position}
                       </div>
                     ))}
+                  </div>
+                )}
+                {harmAlert && harmAlert.detected && (
+                  <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 px-4 py-2.5 rounded-2xl bg-red-600/95 text-white text-xs font-black shadow-2xl backdrop-blur-md border-2 border-red-300 animate-pulse">
+                    <AlertTriangle className="w-5 h-5 text-yellow-300 animate-bounce" />
+                    <div>
+                      <span className="block text-[10px] text-red-200 uppercase tracking-widest font-black">CRITICAL HARM WARNING</span>
+                      <span className="text-sm font-black tracking-wide">{harmAlert.message}</span>
+                    </div>
+                    <button onClick={() => setHarmAlert(null)} className="ml-2 p-1 hover:bg-red-700 rounded-lg">
+                      <X className="w-4 h-4" />
+                    </button>
                   </div>
                 )}
                 {currencyModeActive && (

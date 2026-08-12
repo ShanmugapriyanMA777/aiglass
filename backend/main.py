@@ -623,11 +623,12 @@ def run_yolo(frame):
 
     return boxes_out
 
-# ----------------- STREET OBJECT ANNOUNCEMENT SUB-SYSTEM -----------------
-# Danger levels for street object categories
-DANGER_HIGH = ["car", "bus", "truck", "motorcycle"]  # Vehicles — most dangerous
-DANGER_MEDIUM = ["bicycle", "fire hydrant", "pole", "parking meter", "stop sign", "dog"]  # Obstacles
-DANGER_LOW = ["person", "bench", "cat", "umbrella", "backpack", "handbag", "suitcase"]  # General awareness
+# ----------------- STREET & HOME OBJECT ANNOUNCEMENT SUB-SYSTEM -----------------
+# Harmful & Dangerous Objects
+DANGER_HARM = ["knife", "scissors", "blade", "sharp object", "weapon", "gun", "dagger", "sword", "broken glass", "fire", "razor"]
+DANGER_HIGH = ["car", "bus", "truck", "motorcycle"] + DANGER_HARM  # Vehicles & Weapons
+DANGER_MEDIUM = ["bicycle", "fire hydrant", "pole", "parking meter", "stop sign", "dog", "projector", "board", "whiteboard", "blackboard", "screen"]  # Obstacles & Tech
+DANGER_LOW = ["person", "bench", "cell phone", "phone", "cat", "umbrella", "backpack", "handbag", "suitcase", "chair", "table", "laptop"]  # General awareness
 
 # Cooldown tracker: object_key -> last_announced_time
 street_object_cache = {}
@@ -658,7 +659,10 @@ def estimate_distance(box, frame_height=480):
 
 def get_danger_level(obj_class):
     """Return danger level string for a given object class."""
-    if obj_class in DANGER_HIGH:
+    o_clean = (obj_class or '').lower()
+    if any(h in o_clean for h in DANGER_HARM):
+        return "harmful"
+    elif obj_class in DANGER_HIGH:
         return "high"
     elif obj_class in DANGER_MEDIUM:
         return "medium"
@@ -666,15 +670,19 @@ def get_danger_level(obj_class):
         return "low"
 
 def build_street_object_announcement(obj_class, position, distance_label, distance_meters, lang="en-US"):
-    """Build a natural, conversational announcement for a street object."""
+    """Build a natural, conversational announcement for objects, with urgent harm alerts."""
     is_tamil = lang and lang.lower().startswith("ta")
+    is_hindi = lang and lang.lower().startswith("hi")
+    o_clean = (obj_class or '').lower()
 
     if is_tamil:
         obj_names_ta = {
             "car": "கார்", "bus": "பேருந்து", "truck": "லாரி", "motorcycle": "மோட்டார் சைக்கிள்",
             "bicycle": "மிதிவண்டி", "person": "நபர்", "dog": "நாய்", "cat": "பூனை",
-            "bench": "பெஞ்ச்", "fire hydrant": "தீ குழாய்", "pole": "கம்பம்",
-            "stop sign": "நிறுத்த அடையாளம்", "parking meter": "பார்க்கிங் மீட்டர்",
+            "bench": "பெஞ்ச்", "board": "போர்டு", "whiteboard": "வெள்ளை போர்டு", "blackboard": "கரும்பலகை",
+            "projector": "ப்ரொஜெக்டர்", "cell phone": "கைப்பேசி", "phone": "தொலைபேசி",
+            "knife": "கத்தி ⚠️", "scissors": "கத்தரிக்கோல் ⚠️", "fire hydrant": "தீ குழாய்",
+            "pole": "கம்பம்", "stop sign": "நிறுத்த அடையாளம்", "parking meter": "பார்க்கிங் மீட்டர்",
             "umbrella": "குடை", "backpack": "முதுகுப்பை", "handbag": "கைப்பை",
             "suitcase": "சூட்கேஸ்", "traffic light": "போக்குவரத்து விளக்கு"
         }
@@ -689,21 +697,40 @@ def build_street_object_announcement(obj_class, position, distance_label, distan
             "medium": "சற்று தொலைவில்",
             "far": "தூரத்தில்"
         }
-        name = obj_names_ta.get(obj_class, obj_class)
+        name = obj_names_ta.get(o_clean, obj_class)
         pos = pos_ta.get(position, position)
         dist = dist_ta.get(distance_label, distance_label)
 
-        if obj_class in DANGER_HIGH:
+        if any(h in o_clean for h in DANGER_HARM):
+            return f"⚠️ எச்சரிக்கை! ஆபத்தான கூர்மையான பொருள் {name} {pos} {dist} உள்ளது! கவனமாக விலகிச் செல்லவும்!"
+        elif obj_class in DANGER_HIGH:
             return f"எச்சரிக்கை. ஒரு {name} {pos} {dist} உள்ளது. கவனமாகச் செல்லவும்."
         elif obj_class in DANGER_MEDIUM:
             return f"{pos} ஒரு {name} {dist} உள்ளது. கவனம்."
         else:
             return f"{pos} ஒரு {name} {dist} உள்ளது."
 
+    if is_hindi:
+        obj_names_hi = {
+            "car": "कार", "bus": "बस", "truck": "ट्रक", "motorcycle": "मोटरसाइकिल",
+            "person": "व्यक्ति", "dog": "कुत्ता", "cat": "बिल्ली",
+            "bench": "बेंच", "board": "बोर्ड", "projector": "प्रोजेक्टर",
+            "cell phone": "मोबाइल फोन", "phone": "फोन", "knife": "चाकू ⚠️", "scissors": "कैंची ⚠️"
+        }
+        pos_hi = {"left": "आपके बाएं", "right": "आपके दाएं", "center": "आपके सामने"}
+        name = obj_names_hi.get(o_clean, obj_class)
+        pos = pos_hi.get(position, position)
+
+        if any(h in o_clean for h in DANGER_HARM):
+            return f"⚠️ चेतावनी! खतरनाक वस्तु {name} {pos} है! दूर रहें और सावधान रहें!"
+        return f"{pos} एक {name} है।"
+
     # English
     pos_text = f"on your {position}" if position != "center" else "right ahead"
 
-    if obj_class in DANGER_HIGH:
+    if any(h in o_clean for h in DANGER_HARM):
+        return f"⚠️ CRITICAL DANGER: Harm causing object detected! A {obj_class} is {pos_text}, about {distance_meters} meters away! Stay back and exercise caution!"
+    elif obj_class in DANGER_HIGH:
         return f"Caution. A {obj_class} is {pos_text}, {distance_label}, about {distance_meters} meters away. Stay alert."
     elif obj_class in DANGER_MEDIUM:
         return f"A {obj_class} is {pos_text}, {distance_label}. Be careful."
