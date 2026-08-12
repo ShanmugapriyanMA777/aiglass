@@ -541,16 +541,40 @@ except Exception as e:
 
 def run_yolo(frame):
     if not HAS_YOLO or frame is None:
-        # Mock detections if YOLO is disabled
+        # Mock detections with street-relevant objects if YOLO is disabled
         now = time.time()
-        mock_boxes = []
-        mock_boxes.append({"class": "door", "x1": 100, "y1": 50, "x2": 280, "y2": 400, "confidence": 0.88})
-        mock_boxes.append({"class": "chair", "x1": 300, "y1": 200, "x2": 450, "y2": 450, "confidence": 0.92})
-        return mock_boxes
+        cycle = int(now / 3) % 8
+        mock_scenarios = [
+            [{"class": "car", "x1": 350, "y1": 150, "x2": 550, "y2": 380, "confidence": 0.91},
+             {"class": "person", "x1": 200, "y1": 100, "x2": 300, "y2": 420, "confidence": 0.88}],
+            [{"class": "motorcycle", "x1": 400, "y1": 200, "x2": 560, "y2": 400, "confidence": 0.87},
+             {"class": "traffic light", "x1": 280, "y1": 20, "x2": 340, "y2": 120, "confidence": 0.93}],
+            [{"class": "bicycle", "x1": 50, "y1": 180, "x2": 220, "y2": 410, "confidence": 0.85},
+             {"class": "person", "x1": 300, "y1": 90, "x2": 400, "y2": 430, "confidence": 0.90},
+             {"class": "bench", "x1": 450, "y1": 250, "x2": 600, "y2": 380, "confidence": 0.82}],
+            [{"class": "bus", "x1": 100, "y1": 80, "x2": 500, "y2": 400, "confidence": 0.94},
+             {"class": "stop sign", "x1": 520, "y1": 50, "x2": 590, "y2": 150, "confidence": 0.89}],
+            [{"class": "truck", "x1": 50, "y1": 100, "x2": 350, "y2": 420, "confidence": 0.90},
+             {"class": "fire hydrant", "x1": 500, "y1": 300, "x2": 560, "y2": 430, "confidence": 0.86}],
+            [{"class": "dog", "x1": 150, "y1": 280, "x2": 280, "y2": 420, "confidence": 0.83},
+             {"class": "person", "x1": 350, "y1": 80, "x2": 460, "y2": 440, "confidence": 0.91},
+             {"class": "car", "x1": 500, "y1": 160, "x2": 630, "y2": 350, "confidence": 0.88}],
+            [{"class": "car", "x1": 80, "y1": 140, "x2": 280, "y2": 370, "confidence": 0.89},
+             {"class": "motorcycle", "x1": 320, "y1": 200, "x2": 460, "y2": 400, "confidence": 0.86},
+             {"class": "backpack", "x1": 500, "y1": 220, "x2": 580, "y2": 380, "confidence": 0.80}],
+            [{"class": "umbrella", "x1": 200, "y1": 30, "x2": 400, "y2": 200, "confidence": 0.84},
+             {"class": "person", "x1": 250, "y1": 120, "x2": 370, "y2": 450, "confidence": 0.92},
+             {"class": "cat", "x1": 500, "y1": 330, "x2": 580, "y2": 430, "confidence": 0.78}]
+        ]
+        return mock_scenarios[cycle]
 
     boxes_out = []
     allowed = [
-        "person", "car", "bus", "truck", "motorcycle", "traffic light", "stop sign",
+        # Street / outdoor objects
+        "person", "car", "bus", "truck", "motorcycle", "bicycle",
+        "traffic light", "stop sign", "fire hydrant", "parking meter",
+        "bench", "dog", "cat", "backpack", "umbrella", "handbag", "suitcase",
+        # Indoor / home objects
         "chair", "table", "door", "cabinetDoor", "refrigeratorDoor", "window",
         "cabinet", "couch", "openedDoor", "pole", "refrigerator", "bed"
     ]
@@ -596,6 +620,148 @@ def run_yolo(frame):
 
     return boxes_out
 
+# ----------------- STREET OBJECT ANNOUNCEMENT SUB-SYSTEM -----------------
+# Danger levels for street object categories
+DANGER_HIGH = ["car", "bus", "truck", "motorcycle"]  # Vehicles — most dangerous
+DANGER_MEDIUM = ["bicycle", "fire hydrant", "pole", "parking meter", "stop sign", "dog"]  # Obstacles
+DANGER_LOW = ["person", "bench", "cat", "umbrella", "backpack", "handbag", "suitcase"]  # General awareness
+
+# Cooldown tracker: object_key -> last_announced_time
+street_object_cache = {}
+STREET_OBJECT_COOLDOWN = 12  # seconds — don't repeat the same object+position within this window
+
+def get_object_position(box, frame_width=640):
+    """Determine if object is on left, center, or right of frame."""
+    center_x = (box['x1'] + box['x2']) / 2
+    if center_x < frame_width / 3:
+        return "left"
+    elif center_x > 2 * frame_width / 3:
+        return "right"
+    else:
+        return "center"
+
+def estimate_distance(box, frame_height=480):
+    """Estimate object distance based on bounding box size relative to frame."""
+    box_height = box['y2'] - box['y1']
+    ratio = box_height / frame_height
+    if ratio > 0.55:
+        return "very close", round(max(0.5, 1.0 - ratio), 1)
+    elif ratio > 0.35:
+        return "close", round(max(1.0, 2.5 - ratio * 3), 1)
+    elif ratio > 0.18:
+        return "medium", round(max(2.5, 5.0 - ratio * 8), 1)
+    else:
+        return "far", round(max(5.0, 10.0 - ratio * 20), 1)
+
+def get_danger_level(obj_class):
+    """Return danger level string for a given object class."""
+    if obj_class in DANGER_HIGH:
+        return "high"
+    elif obj_class in DANGER_MEDIUM:
+        return "medium"
+    else:
+        return "low"
+
+def build_street_object_announcement(obj_class, position, distance_label, distance_meters, lang="en-US"):
+    """Build a natural, conversational announcement for a street object."""
+    is_tamil = lang and lang.lower().startswith("ta")
+
+    if is_tamil:
+        obj_names_ta = {
+            "car": "கார்", "bus": "பேருந்து", "truck": "லாரி", "motorcycle": "மோட்டார் சைக்கிள்",
+            "bicycle": "மிதிவண்டி", "person": "நபர்", "dog": "நாய்", "cat": "பூனை",
+            "bench": "பெஞ்ச்", "fire hydrant": "தீ குழாய்", "pole": "கம்பம்",
+            "stop sign": "நிறுத்த அடையாளம்", "parking meter": "பார்க்கிங் மீட்டர்",
+            "umbrella": "குடை", "backpack": "முதுகுப்பை", "handbag": "கைப்பை",
+            "suitcase": "சூட்கேஸ்", "traffic light": "போக்குவரத்து விளக்கு"
+        }
+        pos_ta = {
+            "left": "உங்கள் இடதுபுறம்",
+            "right": "உங்கள் வலதுபுறம்",
+            "center": "உங்கள் நேர் முன்"
+        }
+        dist_ta = {
+            "very close": "மிக அருகில்",
+            "close": "அருகில்",
+            "medium": "சற்று தொலைவில்",
+            "far": "தூரத்தில்"
+        }
+        name = obj_names_ta.get(obj_class, obj_class)
+        pos = pos_ta.get(position, position)
+        dist = dist_ta.get(distance_label, distance_label)
+
+        if obj_class in DANGER_HIGH:
+            return f"எச்சரிக்கை. ஒரு {name} {pos} {dist} உள்ளது. கவனமாகச் செல்லவும்."
+        elif obj_class in DANGER_MEDIUM:
+            return f"{pos} ஒரு {name} {dist} உள்ளது. கவனம்."
+        else:
+            return f"{pos} ஒரு {name} {dist} உள்ளது."
+
+    # English
+    pos_text = f"on your {position}" if position != "center" else "right ahead"
+
+    if obj_class in DANGER_HIGH:
+        return f"Caution. A {obj_class} is {pos_text}, {distance_label}, about {distance_meters} meters away. Stay alert."
+    elif obj_class in DANGER_MEDIUM:
+        return f"A {obj_class} is {pos_text}, {distance_label}. Be careful."
+    else:
+        return f"A {obj_class} is {pos_text}, {distance_label}."
+
+def process_street_objects(yolo_boxes, frame_width=640, frame_height=480, lang="en-US"):
+    """Process YOLO detections into smart street object announcements with cooldown."""
+    global street_object_cache
+    now = time.time()
+
+    # Exclude traffic light from street objects (handled separately)
+    street_relevant = [b for b in yolo_boxes if b['class'] != 'traffic light']
+
+    street_objects = []
+    for box in street_relevant:
+        obj_class = box['class']
+        position = get_object_position(box, frame_width)
+        distance_label, distance_meters = estimate_distance(box, frame_height)
+        danger = get_danger_level(obj_class)
+
+        # Cooldown key: object class + position quadrant
+        cache_key = f"{obj_class}_{position}"
+        should_announce = False
+        last_time = street_object_cache.get(cache_key, 0)
+
+        # Announce if new or cooldown expired; high-danger objects get shorter cooldown
+        cooldown = 6 if danger == "high" else STREET_OBJECT_COOLDOWN
+        if now - last_time >= cooldown:
+            should_announce = True
+            street_object_cache[cache_key] = now
+
+        announcement = ""
+        if should_announce:
+            announcement = build_street_object_announcement(
+                obj_class, position, distance_label, distance_meters, lang
+            )
+
+        street_objects.append({
+            "class": obj_class,
+            "position": position,
+            "distance": distance_label,
+            "distance_meters": distance_meters,
+            "danger": danger,
+            "confidence": round(float(box.get('confidence', 0)), 2),
+            "should_announce": should_announce,
+            "announcement": announcement,
+            "bbox": [box['x1'], box['y1'], box['x2'], box['y2']]
+        })
+
+    # Sort by danger level (high first) then by distance (close first)
+    danger_order = {"high": 0, "medium": 1, "low": 2}
+    street_objects.sort(key=lambda o: (danger_order.get(o['danger'], 3), o['distance_meters']))
+
+    # Clean old cache entries (older than 60s)
+    expired_keys = [k for k, v in street_object_cache.items() if now - v > 60]
+    for k in expired_keys:
+        del street_object_cache[k]
+
+    return street_objects
+
 # ----------------- MAIN API ENDPOINT -----------------
 @app.post("/api/analyze-frame")
 async def analyze_frame_endpoint(request: FrameRequest):
@@ -607,14 +773,17 @@ async def analyze_frame_endpoint(request: FrameRequest):
             if frame is None:
                 raise ValueError("Decoded image is empty")
             frame_width = frame.shape[1]
+            frame_height = frame.shape[0]
         else:
             frame = None
             frame_width = 640
+            frame_height = 480
     except Exception as e:
         print(f"Decoding frame failed: {e}")
         # Build completely simulated returns
         frame = None
         frame_width = 640
+        frame_height = 480
 
     yolo_boxes = run_yolo(frame)
     detected_labels = [b["class"] for b in yolo_boxes]
@@ -628,6 +797,7 @@ async def analyze_frame_endpoint(request: FrameRequest):
     )
     traffic = process_traffic_light(frame, yolo_boxes)
     zebra = detect_zebra_crossing(frame, yolo_boxes)
+    street_objects = process_street_objects(yolo_boxes, frame_width, frame_height, lang=request.lang)
 
     return {
         "scene_description": scene,
@@ -635,7 +805,8 @@ async def analyze_frame_endpoint(request: FrameRequest):
         "ocr_results": ocr_results,
         "traffic_light": traffic,
         "zebra_crossing": zebra,
-        "yolo_detections": yolo_boxes
+        "yolo_detections": yolo_boxes,
+        "street_objects": street_objects
     }
 
 class GeminiAskRequest(BaseModel):
