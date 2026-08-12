@@ -7,6 +7,7 @@ interface MapPanelProps {
   routeCoordinates: [number, number][];
   simulatedUserLocation: [number, number] | null;
   mapType?: 'standard' | 'dark' | 'satellite';
+  accuracyMeters?: number;
 }
 
 export default function MapPanel({
@@ -22,6 +23,7 @@ export default function MapPanel({
   const startMarkerRef = useRef<any>(null);
   const destMarkerRef = useRef<any>(null);
   const userMarkerRef = useRef<any>(null);
+  const accuracyCircleRef = useRef<any>(null);
   const polylineRef = useRef<any>(null);
   const tileLayerRef = useRef<any>(null);
 
@@ -127,7 +129,7 @@ export default function MapPanel({
       destMarkerRef.current = null;
     }
 
-    // 3. Simulated User Position Marker (Live beacon)
+    // 3. User Location Marker & Dynamic Accuracy Radius Circle
     const activeUserLoc = simulatedUserLocation || currentLocation;
     if (activeUserLoc) {
       if (userMarkerRef.current) {
@@ -148,9 +150,30 @@ export default function MapPanel({
           .addTo(map)
           .bindPopup('Your Current Location');
       }
-    } else if (userMarkerRef.current) {
-      map.removeLayer(userMarkerRef.current);
-      userMarkerRef.current = null;
+
+      // Render Dynamic GPS Accuracy Circle
+      const radiusMeters = accuracyMeters || 10;
+      if (accuracyCircleRef.current) {
+        accuracyCircleRef.current.setLatLng(activeUserLoc);
+        accuracyCircleRef.current.setRadius(radiusMeters);
+      } else {
+        accuracyCircleRef.current = L.circle(activeUserLoc, {
+          radius: radiusMeters,
+          color: '#2563eb',
+          fillColor: '#3b82f6',
+          fillOpacity: 0.15,
+          weight: 1.5
+        }).addTo(map);
+      }
+    } else {
+      if (userMarkerRef.current) {
+        map.removeLayer(userMarkerRef.current);
+        userMarkerRef.current = null;
+      }
+      if (accuracyCircleRef.current) {
+        map.removeLayer(accuracyCircleRef.current);
+        accuracyCircleRef.current = null;
+      }
     }
 
     // 4. Polyline route

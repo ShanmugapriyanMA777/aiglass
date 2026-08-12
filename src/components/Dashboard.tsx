@@ -14,6 +14,8 @@ import { analyzeFrame, drawBoundingBoxes, getLocalModel, type VisionResult, askG
 import { speak, stopSpeaking, configureSpeech, SpeechRecognitionHelper, isSpeaking } from '../lib/speech';
 import { supabase, type AppSettings, type EmergencyContact, type DetectionRecord, type ActivityLogEntry, type DetectionType } from '../lib/supabase';
 import { syncAIActivity, syncAlert, syncDeviceStatus, syncLocation } from '../lib/guardianSync';
+import { LocationEngine, type TrustedLocation } from '../lib/LocationEngine';
+import { GpsDiagnosticsModal } from './GpsDiagnosticsModal';
 import MapPanel from './MapPanel';
 import { searchPlaces, getWalkingRoute, getDistanceMeters, type NavigationStep } from '../lib/maps';
 import { getItem, setItem } from '../lib/storage';
@@ -149,8 +151,24 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
   const [distanceRemaining, setDistanceRemaining] = useState<number>(0);
   const [etaMinutes, setEtaMinutes] = useState<number>(0);
   const [currentRoadName, setCurrentRoadName] = useState<string>('');
-  const [gpsStatus, setGpsStatus] = useState<'off' | 'searching' | 'active'>('off');
+  const [gpsStatus, setGpsStatus] = useState<'off' | 'searching' | 'active'>('searching');
   const [isSimulatingWalk, setIsSimulatingWalk] = useState(false);
+  const [trustedLoc, setTrustedLoc] = useState<TrustedLocation | null>(null);
+  const [showGpsDiagnostics, setShowGpsDiagnostics] = useState(false);
+
+  useEffect(() => {
+    LocationEngine.startTracking('browser');
+    const unsubscribe = LocationEngine.subscribe((loc) => {
+      setTrustedLoc(loc);
+      setCurrentCoords([loc.latitude, loc.longitude]);
+      if (loc.speed !== null) setSpeedMps(loc.speed);
+      setGpsStatus('active');
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, []);
 
   const awaitingCommandRef = useRef(false);
   const commandTimeoutRef = useRef<number | null>(null);
@@ -2213,9 +2231,22 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
                 destination={destinationCoords}
                 routeCoordinates={routeCoords}
                 simulatedUserLocation={simulatedLoc}
+                accuracyMeters={trustedLoc?.accuracy}
                 mapType={(settings.map_type as 'standard' | 'dark' | 'satellite') || 'standard'}
               />
+              <button
+                onClick={() => setShowGpsDiagnostics(true)}
+                className="absolute top-3 right-3 z-20 px-3 py-1.5 bg-slate-900/80 hover:bg-slate-900 text-white text-xs font-bold rounded-lg backdrop-blur-sm border border-slate-700 shadow-md flex items-center gap-1.5 transition"
+              >
+                <Radio className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+                GPS Diagnostics (±{trustedLoc?.accuracy || 10}m)
+              </button>
             </div>
+
+            <GpsDiagnosticsModal
+              isOpen={showGpsDiagnostics}
+              onClose={() => setShowGpsDiagnostics(false)}
+            />
 
             {/* AI Warning Alerts overlay */}
             {visionResult?.warning && (
