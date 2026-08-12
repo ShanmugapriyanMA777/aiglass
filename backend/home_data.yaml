@@ -1,0 +1,16 @@
+train: C:/Users/shaisty priya/Downloads/archive (9)/train/images
+val: C:/Users/shaisty priya/Downloads/archive (9)/valid/images
+test: C:/Users/shaisty priya/Downloads/archive (9)/test/images
+
+nc: 10
+names:
+  0: door
+  1: cabinetDoor
+  2: refrigeratorDoor
+  3: window
+  4: chair
+  5: table
+  6: cabinet
+  7: couch
+  8: openedDoor
+  9: pole

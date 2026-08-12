@@ -528,44 +528,72 @@ def detect_zebra_crossing(frame, yolo_boxes) -> dict:
     }
 
 # ----------------- YOLO PIPELINE -----------------
+# Try to load custom trained home objects model if present
+try:
+    home_model_path = os.path.join(os.path.dirname(__file__), "home_objects_best.pt")
+    if HAS_YOLO and os.path.exists(home_model_path):
+        home_yolo_model = YOLO(home_model_path)
+    else:
+        home_yolo_model = None
+except Exception as e:
+    print(f"Loading home_objects_best.pt note: {e}")
+    home_yolo_model = None
+
 def run_yolo(frame):
-    if not HAS_YOLO:
-        # Mock some pedestrians/vehicles/traffic lights to feed the CV calculations
+    if not HAS_YOLO or frame is None:
+        # Mock detections if YOLO is disabled
         now = time.time()
         mock_boxes = []
-        # Add a traffic light
-        mock_boxes.append({
-            "class": "traffic light", "x1": 100, "y1": 50, "x2": 180, "y2": 200, "confidence": 0.88
-        })
-        # Add a person
-        mock_boxes.append({
-            "class": "person", "x1": 300, "y1": 150, "x2": 380, "y2": 450, "confidence": 0.92
-        })
-        # Cycle vehicles
-        if int(now) % 15 < 5:
-            mock_boxes.append({
-                "class": "car", "x1": 50, "y1": 250, "x2": 250, "y2": 450, "confidence": 0.85
-            })
+        mock_boxes.append({"class": "door", "x1": 100, "y1": 50, "x2": 280, "y2": 400, "confidence": 0.88})
+        mock_boxes.append({"class": "chair", "x1": 300, "y1": 200, "x2": 450, "y2": 450, "confidence": 0.92})
         return mock_boxes
 
-    results = yolo_model(frame)
     boxes_out = []
-    for r in results:
-        for box in r.boxes:
-            c = int(box.cls)
-            label = yolo_model.names[c]
-            # Filters classes we need
-            allowed = ["person", "car", "bus", "truck", "motorcycle", "traffic light", "stop sign", "chair", "table", "door"]
-            if label in allowed:
-                coords = box.xyxy[0].tolist()
-                boxes_out.append({
-                    "class": label,
-                    "x1": coords[0],
-                    "y1": coords[1],
-                    "x2": coords[2],
-                    "y2": coords[3],
-                    "confidence": float(box.conf)
-                })
+    allowed = [
+        "person", "car", "bus", "truck", "motorcycle", "traffic light", "stop sign",
+        "chair", "table", "door", "cabinetDoor", "refrigeratorDoor", "window",
+        "cabinet", "couch", "openedDoor", "pole", "refrigerator", "bed"
+    ]
+
+    try:
+        results = yolo_model(frame)
+        for r in results:
+            for box in r.boxes:
+                c = int(box.cls)
+                label = yolo_model.names[c]
+                if label in allowed:
+                    coords = box.xyxy[0].tolist()
+                    boxes_out.append({
+                        "class": label,
+                        "x1": coords[0],
+                        "y1": coords[1],
+                        "x2": coords[2],
+                        "y2": coords[3],
+                        "confidence": float(box.conf)
+                    })
+    except Exception as e:
+        print(f"General YOLO inference error: {e}")
+
+    # Run fine-tuned Home Objects model if available
+    if home_yolo_model is not None:
+        try:
+            home_results = home_yolo_model(frame)
+            for r in home_results:
+                for box in r.boxes:
+                    c = int(box.cls)
+                    label = home_yolo_model.names[c]
+                    coords = box.xyxy[0].tolist()
+                    boxes_out.append({
+                        "class": label,
+                        "x1": coords[0],
+                        "y1": coords[1],
+                        "x2": coords[2],
+                        "y2": coords[3],
+                        "confidence": float(box.conf)
+                    })
+        except Exception as e:
+            print(f"Home objects YOLO model inference error: {e}")
+
     return boxes_out
 
 # ----------------- MAIN API ENDPOINT -----------------
@@ -772,42 +800,268 @@ async def stt_endpoint(request: STTRequest):
         print(f"STT failed: {e}")
         return {"error": str(e)}
 
+# Try to load custom trained PyTorch currency model
+try:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    class CurrencyCNN(nn.Module):
+        def __init__(self, num_classes=7):
+            super(CurrencyCNN, self).__init__()
+            self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
+            self.bn1 = nn.BatchNorm2d(32)
+            self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+            self.bn2 = nn.BatchNorm2d(64)
+            self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+            self.bn3 = nn.BatchNorm2d(128)
+            self.conv4 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
+            self.bn4 = nn.BatchNorm2d(256)
+            self.pool = nn.MaxPool2d(2, 2)
+            self.dropout = nn.Dropout(0.3)
+            self.fc1 = nn.Linear(256 * 8 * 8, 512)
+            self.fc2 = nn.Linear(512, num_classes)
+
+        def forward(self, x):
+            x = self.pool(F.relu(self.bn1(self.conv1(x))))
+            x = self.pool(F.relu(self.bn2(self.conv2(x))))
+            x = self.pool(F.relu(self.bn3(self.conv3(x))))
+            x = self.pool(F.relu(self.bn4(self.conv4(x))))
+            x = x.view(x.size(0), -1)
+            x = self.dropout(F.relu(self.fc1(x)))
+            x = self.fc2(x)
+            return x
+
+    def predict_currency_pytorch(frame):
+        model_path = os.path.join(os.path.dirname(__file__), "currency_model.pth")
+        classes_path = os.path.join(os.path.dirname(__file__), "currency_classes.json")
+        
+        if not (os.path.exists(model_path) and os.path.exists(classes_path)):
+            return None
+
+        with open(classes_path, "r") as f:
+            classes_meta = json.load(f)
+
+        model = CurrencyCNN(num_classes=len(classes_meta))
+        model.load_state_dict(torch.load(model_path, map_location=torch.device("cpu")))
+        model.eval()
+
+        img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img_resized = cv2.resize(img_rgb, (128, 128)).astype(np.float32) / 255.0
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        img_norm = (img_resized - mean) / std
+        img_tensor = torch.tensor(np.transpose(img_norm, (2, 0, 1))).unsqueeze(0)
+
+        with torch.no_grad():
+            outputs = model(img_tensor)
+            probs = F.softmax(outputs, dim=1)[0]
+            max_prob, max_idx = torch.max(probs, 0)
+            
+            conf = float(max_prob.item())
+            if conf >= 0.55:
+                pred_meta = classes_meta[max_idx.item()]
+                return {
+                    "currency": pred_meta["currency"],
+                    "value_text": pred_meta["value_text"],
+                    "confidence": round(conf, 3)
+                }
+        return None
+except Exception as e:
+    print(f"PyTorch currency model setup note: {e}")
+    predict_currency_pytorch = lambda frame: None
+
 class CurrencyRequest(BaseModel):
     frame_base64: str
 
 @app.post("/api/detect-currency")
 async def detect_currency_endpoint(request: CurrencyRequest):
-    import time, random
-    # Simulated offline CV engine for currency detection
-    # This mocks a YOLO/MobileNet model running locally for Indian currency
-    now = int(time.time())
-    # Rotate every 15 seconds to simulate showing different notes/coins
-    cycle = (now // 15) % 10
-    
-    currencies = [
-        {"currency": "₹500 Indian Rupee Note", "value_text": "five hundred rupee note"},
-        {"currency": "₹10 Indian Rupee Coin", "value_text": "ten rupee coin"},
-        {"currency": "", "value_text": ""}, # Empty state to test debouncing
-        {"currency": "₹200 Indian Rupee Note", "value_text": "two hundred rupee note"},
-        {"currency": "₹50 Indian Rupee Note", "value_text": "fifty rupee note"},
-        {"currency": "", "value_text": ""},
-        {"currency": "₹100 Indian Rupee Note", "value_text": "one hundred rupee note"},
-        {"currency": "₹5 Indian Rupee Coin", "value_text": "five rupee coin"},
-        {"currency": "₹20 Indian Rupee Note", "value_text": "twenty rupee note"},
-        {"currency": "₹10 Indian Rupee Note", "value_text": "ten rupee note"}
-    ]
-    
-    current_sim = currencies[cycle]
-    
-    # Random realistic confidence
-    conf = round(random.uniform(0.85, 0.99), 3) if current_sim["currency"] else 0.0
-    
+    import time, random, json
+    start_time = time.time()
+
+    # 1. Decode frame first
+    try:
+        frame_bytes = base64.b64decode(request.frame_base64)
+        if HAS_CV:
+            np_arr = np.frombuffer(frame_bytes, np.uint8)
+            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        else:
+            frame = None
+    except Exception as e:
+        print(f"Frame decoding error: {e}")
+        frame = None
+
+    # 2. Primary: Run custom trained PyTorch Deep Learning model if available
+    if frame is not None:
+        try:
+            pytorch_res = predict_currency_pytorch(frame)
+            if pytorch_res:
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                return {
+                    "detected": True,
+                    "currency": pytorch_res["currency"],
+                    "value_text": pytorch_res["value_text"],
+                    "confidence": pytorch_res["confidence"],
+                    "time_ms": elapsed_ms
+                }
+        except Exception as pt_err:
+            print(f"PyTorch model inference error: {pt_err}")
+
+    # 3. Secondary: Try Gemini Vision AI via OpenRouter if API key is present
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if api_key and request.frame_base64:
+        try:
+            import requests
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://visionassist.app",
+                "X-Title": "VisionAssist"
+            }
+            prompt_text = (
+                "Analyze this image frame carefully for currency notes or coins (Indian Rupees ₹10, ₹20, ₹50, ₹100, ₹200, ₹500, ₹2000, US Dollars $, Euros €, British Pounds £, etc.). "
+                "Respond ONLY with a valid raw JSON object (no markdown, no code fences) in this exact format:\n"
+                '{"detected": true, "currency": "₹500 Indian Rupee Note", "value_text": "five hundred rupee note", "confidence": 0.96}\n'
+                "If NO currency note or coin is clearly visible, return:\n"
+                '{"detected": false, "currency": "", "value_text": "", "confidence": 0.0}'
+            )
+            payload = {
+                "model": "google/gemini-2.5-flash",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_text},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{request.frame_base64}"}}
+                        ]
+                    }
+                ],
+                "max_tokens": 300,
+                "temperature": 0.2,
+                "response_format": {"type": "json_object"}
+            }
+            res = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=8)
+            if res.status_code == 200:
+                resp_json = res.json()
+                content = resp_json['choices'][0]['message']['content'].strip()
+                parsed = json.loads(content)
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                if parsed.get("detected"):
+                    return {
+                        "detected": bool(parsed.get("detected", False)),
+                        "currency": str(parsed.get("currency", "")),
+                        "value_text": str(parsed.get("value_text", "")),
+                        "confidence": float(parsed.get("confidence", 0.0)),
+                        "time_ms": elapsed_ms
+                    }
+        except Exception as e:
+            print(f"Gemini currency vision detection failed: {e}")
+
+    # 2. Fallback: Offline CV + EasyOCR + Color Analysis Pipeline
+    try:
+        frame_bytes = base64.b64decode(request.frame_base64)
+        if HAS_CV:
+            np_arr = np.frombuffer(frame_bytes, np.uint8)
+            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        else:
+            frame = None
+    except Exception as e:
+        print(f"Frame decoding error: {e}")
+        frame = None
+
+    if frame is not None:
+        detected_currency = None
+        value_text = None
+        confidence = 0.0
+
+        # a. OCR text extraction for currency markers
+        ocr_texts = []
+        if HAS_OCR:
+            try:
+                ocr_raw = reader.readtext(frame)
+                ocr_texts = [text.upper().strip() for (_, text, conf) in ocr_raw if conf > 0.2]
+            except Exception as ocr_err:
+                print(f"EasyOCR in currency failed: {ocr_err}")
+
+        joined_ocr = " ".join(ocr_texts)
+
+        # Check for Indian Rupee denominations in OCR text
+        if "2000" in joined_ocr:
+            detected_currency, value_text = "₹2000 Indian Rupee Note", "two thousand rupee note"
+            confidence = 0.95
+        elif "500" in joined_ocr:
+            detected_currency, value_text = "₹500 Indian Rupee Note", "five hundred rupee note"
+            confidence = 0.95
+        elif "200" in joined_ocr:
+            detected_currency, value_text = "₹200 Indian Rupee Note", "two hundred rupee note"
+            confidence = 0.94
+        elif "100" in joined_ocr:
+            detected_currency, value_text = "₹100 Indian Rupee Note", "one hundred rupee note"
+            confidence = 0.93
+        elif "50" in joined_ocr:
+            detected_currency, value_text = "₹50 Indian Rupee Note", "fifty rupee note"
+            confidence = 0.92
+        elif "20" in joined_ocr:
+            detected_currency, value_text = "₹20 Indian Rupee Note", "twenty rupee note"
+            confidence = 0.90
+        elif "10" in joined_ocr:
+            detected_currency, value_text = "₹10 Indian Rupee Note", "ten rupee note"
+            confidence = 0.88
+        elif any(k in joined_ocr for k in ["RESERVE BANK", "RUPEES", "BHARATIYA RESERVE"]):
+            detected_currency, value_text = "Indian Rupee Note", "Indian rupee note"
+            confidence = 0.80
+        elif any(k in joined_ocr for k in ["FEDERAL RESERVE", "ONE DOLLAR", "FIVE DOLLARS", "TEN DOLLARS", "TWENTY DOLLARS", "ONE HUNDRED DOLLARS"]):
+            detected_currency, value_text = "US Dollar Note", "US dollar note"
+            confidence = 0.85
+
+        # b. HSV Color analysis fallback if OCR was inconclusive
+        if not detected_currency and HAS_CV:
+            try:
+                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                tot_px = frame.shape[0] * frame.shape[1]
+
+                # Color definitions for Indian bank notes
+                magenta_mask = cv2.inRange(hsv, np.array([140, 50, 100]), np.array([170, 255, 255]))
+                yellow_mask = cv2.inRange(hsv, np.array([15, 100, 100]), np.array([35, 255, 255]))
+                violet_mask = cv2.inRange(hsv, np.array([125, 30, 100]), np.array([155, 255, 255]))
+                cyan_mask = cv2.inRange(hsv, np.array([85, 80, 100]), np.array([110, 255, 255]))
+                green_mask = cv2.inRange(hsv, np.array([35, 60, 100]), np.array([75, 255, 255]))
+                brown_mask = cv2.inRange(hsv, np.array([5, 50, 40]), np.array([20, 180, 140]))
+
+                ratios = {
+                    "₹2000 Indian Rupee Note": (cv2.countNonZero(magenta_mask) / tot_px, "two thousand rupee note"),
+                    "₹200 Indian Rupee Note": (cv2.countNonZero(yellow_mask) / tot_px, "two hundred rupee note"),
+                    "₹100 Indian Rupee Note": (cv2.countNonZero(violet_mask) / tot_px, "one hundred rupee note"),
+                    "₹50 Indian Rupee Note": (cv2.countNonZero(cyan_mask) / tot_px, "fifty rupee note"),
+                    "₹20 Indian Rupee Note": (cv2.countNonZero(green_mask) / tot_px, "twenty rupee note"),
+                    "₹10 Indian Rupee Note": (cv2.countNonZero(brown_mask) / tot_px, "ten rupee note"),
+                }
+
+                best_match = max(ratios.items(), key=lambda item: item[1][0])
+                if best_match[1][0] > 0.15: # Dominates at least 15% of frame
+                    detected_currency = best_match[0]
+                    value_text = best_match[1][1]
+                    confidence = min(0.92, round(0.70 + best_match[1][0], 2))
+            except Exception as cv_err:
+                print(f"Color analysis in currency failed: {cv_err}")
+
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        if detected_currency:
+            return {
+                "detected": True,
+                "currency": detected_currency,
+                "value_text": value_text,
+                "confidence": confidence,
+                "time_ms": elapsed_ms
+            }
+
+    elapsed_ms = int((time.time() - start_time) * 1000)
     return {
-        "detected": bool(current_sim["currency"]),
-        "currency": current_sim["currency"],
-        "value_text": current_sim["value_text"],
-        "confidence": conf,
-        "time_ms": random.randint(120, 250) # Simulated fast latency < 1s
+        "detected": False,
+        "currency": "",
+        "value_text": "",
+        "confidence": 0.0,
+        "time_ms": elapsed_ms
     }
 
 if __name__ == "__main__":

@@ -50,10 +50,13 @@ export interface CurrencyDetectionResult {
   time_ms: number;
 }
 
-export async function detectCurrency(video: HTMLVideoElement | null): Promise<CurrencyDetectionResult> {
+export async function detectCurrency(video: HTMLVideoElement | null, targetLang?: string): Promise<CurrencyDetectionResult> {
   if (!video) return { detected: false, currency: '', value_text: '', confidence: 0, time_ms: 0 };
+  const startTime = Date.now();
   const base64 = captureFrame(video);
   const cleanBase64 = base64.replace(/^data:image\/(png|jpeg);base64,/, '');
+
+  // 1. Try local Python Backend
   try {
     const res = await fetch('http://localhost:8000/api/detect-currency', {
       method: 'POST',
@@ -61,12 +64,35 @@ export async function detectCurrency(video: HTMLVideoElement | null): Promise<Cu
       body: JSON.stringify({ frame_base64: cleanBase64 })
     });
     if (res.ok) {
-      return await res.json();
+      const data = await res.json();
+      if (data.detected) return data;
     }
   } catch (e) {
-    console.error('Currency detection error:', e);
+    console.warn('Local currency endpoint unreachable, falling back to cloud Vision AI:', e);
   }
-  return { detected: false, currency: '', value_text: '', confidence: 0, time_ms: 0 };
+
+  // 2. Fallback to Supabase Edge Function Vision AI
+  try {
+    const visionRes = await analyzeFrame(
+      video,
+      'Examine this camera image carefully for currency notes or coins (Indian Rupees ₹10, ₹20, ₹50, ₹100, ₹200, ₹500, ₹2000, US Dollars, Euros, etc.). If a currency note or coin is present, state its denomination clearly in the "currency" field (e.g. "₹500 Indian Rupee Note"). Respond with JSON: {"currency": "currency value or empty string", "objects": [], "scene": "", "text": "", "colors": [], "warning": ""}.',
+      targetLang
+    );
+    if (visionRes.currency && visionRes.currency.trim().length > 0) {
+      const currStr = visionRes.currency.trim();
+      return {
+        detected: true,
+        currency: currStr,
+        value_text: currStr.toLowerCase(),
+        confidence: 0.92,
+        time_ms: Date.now() - startTime
+      };
+    }
+  } catch (cloudErr) {
+    console.warn('Cloud currency vision fallback failed:', cloudErr);
+  }
+
+  return { detected: false, currency: '', value_text: '', confidence: 0, time_ms: Date.now() - startTime };
 }
 
 export function captureFrame(video: HTMLVideoElement | null, maxWidth: number = 640): string {

@@ -873,7 +873,32 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
   }, [speakIfNotMuted, addHistory]);
 
   // Currency recognition
-  // Currency recognition toggle
+  // Currency recognition toggle & manual trigger
+  const scanCurrencyNow = useCallback(async () => {
+    if (!videoRef.current) return;
+    setAnalyzing(true);
+    speakIfNotMuted("Scanning currency note or coin...");
+    try {
+      const result = await detectCurrency(videoRef.current, settings.voice_lang);
+      setCurrencyData(result);
+      if (result.detected && result.currency) {
+        lastSpokenCurrency.current = result.currency;
+        speakIfNotMuted(`This is a ${result.value_text || result.currency}`);
+        setCurrencyHistory(prev => [{
+          time: new Date().toLocaleTimeString(),
+          text: result.currency,
+          conf: result.confidence
+        }, ...prev].slice(0, 10));
+        addHistory('currency', result.currency, result.confidence, 'Currency detected');
+      } else {
+        speakIfNotMuted("No currency note or coin detected. Please adjust lighting and hold note straight.");
+      }
+    } catch (err) {
+      speakIfNotMuted("Currency scan error.");
+    }
+    setAnalyzing(false);
+  }, [speakIfNotMuted, settings.voice_lang, addHistory]);
+
   const handleCurrency = useCallback(() => {
     if (!videoRef.current || !streamRef.current) {
       speakIfNotMuted("Please start the camera first.");
@@ -886,10 +911,12 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     } else {
       setCurrencyModeActive(true);
       setActiveFeature('currency');
-      speakIfNotMuted('I am ready to check your currency! Just hold a note or coin up to the camera for me.');
+      speakIfNotMuted('I am ready to check your currency! Hold a note or coin up to the camera.');
       lastSpokenCurrency.current = '';
+      // Initial immediate scan
+      scanCurrencyNow();
     }
-  }, [currencyModeActive, speakIfNotMuted]);
+  }, [currencyModeActive, speakIfNotMuted, scanCurrencyNow]);
 
   useEffect(() => {
     if (!currencyModeActive || !videoRef.current) {
@@ -899,14 +926,13 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     
     currencyIntervalRef.current = window.setInterval(async () => {
       if (!videoRef.current) return;
-      const result = await detectCurrency(videoRef.current);
+      const result = await detectCurrency(videoRef.current, settings.voice_lang);
       setCurrencyData(result);
       
       if (result.detected && result.currency) {
-        // Smart Detection
         if (result.currency !== lastSpokenCurrency.current) {
           lastSpokenCurrency.current = result.currency;
-          voiceEngine.general(`This is a ${result.value_text || result.currency}`);
+          speakIfNotMuted(`This is a ${result.value_text || result.currency}`);
           
           setCurrencyHistory(prev => [{
             time: new Date().toLocaleTimeString(),
@@ -917,13 +943,12 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
           addHistory('currency', result.currency, result.confidence, 'Currency detected');
         }
       } else if (!result.detected) {
-        // Reset last spoken if no currency is seen, so it re-announces if shown again
         lastSpokenCurrency.current = '';
       }
-    }, 800);
+    }, 1000);
     
     return () => window.clearInterval(currencyIntervalRef.current);
-  }, [currencyModeActive, addHistory]);
+  }, [currencyModeActive, addHistory, settings.voice_lang, speakIfNotMuted]);
 
   // Face recognition
   const handleFace = useCallback(async () => {
@@ -2243,22 +2268,33 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
                   <h3 className="font-bold flex items-center gap-2">
                     <DollarSign className="w-5 h-5 animate-pulse" /> Currency Scanner Active
                   </h3>
-                  <button onClick={() => { setCurrencyModeActive(false); setActiveFeature(''); }} className="text-white hover:text-red-200">
-                    <Square className="w-4 h-4" />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={scanCurrencyNow}
+                      className="px-2.5 py-1 bg-white/20 hover:bg-white/30 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1"
+                    >
+                      <Scan className="w-3.5 h-3.5" /> Scan Now
+                    </button>
+                    <button onClick={() => { setCurrencyModeActive(false); setActiveFeature(''); }} className="text-white hover:text-red-200">
+                      <Square className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
                 <div className="p-4 space-y-4">
                   <div className="flex justify-between items-center bg-slate-50 rounded-xl p-3 border border-slate-200">
                     <div>
                       <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wide">Detection Status</p>
-                      <p className={`font-semibold ${currencyData?.detected ? 'text-success-600' : 'text-slate-700'}`}>
-                        {currencyData?.detected ? currencyData.currency : "Waiting for currency..."}
+                      <p className={`font-semibold ${currencyData?.detected ? 'text-success-600 text-base' : 'text-slate-700'}`}>
+                        {currencyData?.detected ? currencyData.currency : "Waiting for currency note or coin..."}
                       </p>
                     </div>
                     {currencyData?.detected && (
                       <div className="text-right">
                         <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wide">Confidence</p>
                         <p className="font-bold text-slate-700">{(currencyData.confidence * 100).toFixed(1)}%</p>
+                        {currencyData.time_ms > 0 && (
+                          <p className="text-[9px] text-slate-400 font-mono">{currencyData.time_ms}ms</p>
+                        )}
                       </div>
                     )}
                   </div>

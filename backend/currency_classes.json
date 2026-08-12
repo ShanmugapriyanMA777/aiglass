@@ -1,0 +1,37 @@
+[
+  {
+    "currency": "\u20b9100 Indian Rupee Note",
+    "value_text": "one hundred rupee note",
+    "folder": "1Hundrednote"
+  },
+  {
+    "currency": "\u20b9200 Indian Rupee Note",
+    "value_text": "two hundred rupee note",
+    "folder": "2Hundrednote"
+  },
+  {
+    "currency": "\u20b92000 Indian Rupee Note",
+    "value_text": "two thousand rupee note",
+    "folder": "2Thousandnote"
+  },
+  {
+    "currency": "\u20b9500 Indian Rupee Note",
+    "value_text": "five hundred rupee note",
+    "folder": "5Hundrednote"
+  },
+  {
+    "currency": "\u20b950 Indian Rupee Note",
+    "value_text": "fifty rupee note",
+    "folder": "Fiftynote"
+  },
+  {
+    "currency": "\u20b910 Indian Rupee Note",
+    "value_text": "ten rupee note",
+    "folder": "Tennote"
+  },
+  {
+    "currency": "\u20b920 Indian Rupee Note",
+    "value_text": "twenty rupee note",
+    "folder": "Twentynote"
+  }
+]
