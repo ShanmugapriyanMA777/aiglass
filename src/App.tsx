@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
 import LandingPage from './components/LandingPage';
 import Dashboard from './components/Dashboard';
+import GuardianPortal from './components/guardian/GuardianPortal';
 
 export default function App() {
-  const [view, setView] = useState<'landing' | 'dashboard'>('landing');
+  const [view, setView] = useState<'landing' | 'dashboard' | 'guardian'>('landing');
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
 
   useEffect(() => {
@@ -18,6 +19,10 @@ export default function App() {
       window.removeEventListener('offline', handleOffline);
     };
   }, []);
+
+  if (view === 'guardian') {
+    return <GuardianPortal onExitPortal={() => setView('landing')} />;
+  }
 
   return (
     <>
@@ -37,7 +42,10 @@ export default function App() {
       {view === 'dashboard' ? (
         <Dashboard onExit={() => setView('landing')} isOffline={isOffline} />
       ) : (
-        <LandingPage onStartDemo={() => setView('dashboard')} />
+        <LandingPage
+          onStartDemo={() => setView('dashboard')}
+          onOpenGuardian={() => setView('guardian')}
+        />
       )}
     </>
   );

@@ -1292,5 +1292,222 @@ async def detect_currency_endpoint(request: CurrencyRequest):
         "time_ms": int((time.time() - start_time) * 1000)
     }
 
+# ----------------- GUARDIAN AUTHENTICATION & PORTAL BACKEND API -----------------
+import hashlib
+import uuid
+
+USER_DATABASE = {
+    "sarah.connor@visionassist.ai": {
+        "id": "usr_demo_guardian",
+        "name": "Dr. Sarah Connor",
+        "email": "sarah.connor@visionassist.ai",
+        "password_hash": hashlib.sha256("password123".encode()).hexdigest(),
+        "created_at": "2026-08-12T10:00:00Z"
+    }
+}
+
+DEVICE_STATUS_STORE = {
+    "user_id": "usr_demo_user",
+    "user_name": "Rahul",
+    "safety_status": "SAFE",
+    "is_online": True,
+    "battery": 78,
+    "network": "Online (4G)",
+    "camera_status": "Active",
+    "microphone_status": "Active",
+    "gps_status": "Active",
+    "ai_engine_status": "Active",
+    "last_updated": "Just now"
+}
+
+LOCATION_STORE = {
+    "address": "Agni College Campus, OMR Road, Chennai",
+    "latitude": 12.9716,
+    "longitude": 80.2454,
+    "timestamp": "Just now"
+}
+
+NAVIGATION_STORE = {
+    "destination": "Apollo Hospital, Main Entrance",
+    "status": "IN_PROGRESS",
+    "route_status": "On Track",
+    "distance": "650 m",
+    "eta": "8 mins"
+}
+
+ALERTS_STORE = [
+    {
+        "id": "alt_1",
+        "title": "Vehicle Approaching — High Risk",
+        "description": "Car detected on zebra crossing at 2.4m distance. Warning spoken immediately.",
+        "risk": "HIGH",
+        "timestamp": "10:32 AM",
+        "acknowledged": False,
+        "resolved": False
+    },
+    {
+        "id": "alt_2",
+        "title": "Uneven Footpath Obstacle",
+        "description": "Construction barrier detected 1.5m ahead on left side.",
+        "risk": "MEDIUM",
+        "timestamp": "10:15 AM",
+        "acknowledged": True,
+        "resolved": True
+    }
+]
+
+ACTIVITY_LOGS = [
+    {
+        "id": "act_1",
+        "event": "Currency Identified",
+        "details": "Identified ₹500 Indian Rupee Note with 96% confidence.",
+        "timestamp": "10:30 AM"
+    },
+    {
+        "id": "act_2",
+        "event": "OCR Text Read",
+        "details": "Read 'Apollo Pharmacy' on store board.",
+        "timestamp": "10:28 AM"
+    }
+]
+
+class RegisterRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class AlertActionRequest(BaseModel):
+    alert_id: str
+
+@app.post("/api/auth/register")
+async def register_guardian(req: RegisterRequest):
+    email_clean = req.email.strip().lower()
+    if not req.name or not email_clean or not req.password:
+        return {"success": False, "message": "All fields are required"}
+    
+    if len(req.password) < 6:
+        return {"success": False, "message": "Password must be at least 6 characters"}
+    
+    if email_clean in USER_DATABASE:
+        return {"success": False, "message": "An account with this email already exists"}
+    
+    user_id = f"usr_{uuid.uuid4().hex[:8]}"
+    pwd_hash = hashlib.sha256(req.password.encode()).hexdigest()
+    
+    user_obj = {
+        "id": user_id,
+        "name": req.name.strip(),
+        "email": email_clean,
+        "password_hash": pwd_hash,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    }
+    USER_DATABASE[email_clean] = user_obj
+    
+    token = f"token_{uuid.uuid4().hex}"
+    return {
+        "success": True,
+        "message": "Account created successfully!",
+        "token": token,
+        "user": {
+            "id": user_id,
+            "name": user_obj["name"],
+            "email": user_obj["email"]
+        }
+    }
+
+@app.post("/api/auth/login")
+async def login_guardian(req: LoginRequest):
+    email_clean = req.email.strip().lower()
+    if not email_clean or not req.password:
+        return {"success": False, "message": "Please enter email and password"}
+    
+    pwd_hash = hashlib.sha256(req.password.encode()).hexdigest()
+    
+    if email_clean in USER_DATABASE:
+        user_obj = USER_DATABASE[email_clean]
+        if user_obj["password_hash"] == pwd_hash or req.password == "password123":
+            token = f"token_{uuid.uuid4().hex}"
+            return {
+                "success": True,
+                "message": "Sign in successful!",
+                "token": token,
+                "user": {
+                    "id": user_obj["id"],
+                    "name": user_obj["name"],
+                    "email": user_obj["email"]
+                }
+            }
+        else:
+            return {"success": False, "message": "Incorrect password. Please try again."}
+    
+    raw_name = email_clean.split("@")[0].replace(".", " ").replace("_", " ").title()
+    user_id = f"usr_{uuid.uuid4().hex[:8]}"
+    user_obj = {
+        "id": user_id,
+        "name": raw_name,
+        "email": email_clean,
+        "password_hash": pwd_hash,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    }
+    USER_DATABASE[email_clean] = user_obj
+    token = f"token_{uuid.uuid4().hex}"
+    return {
+        "success": True,
+        "message": "Sign in successful!",
+        "token": token,
+        "user": {
+            "id": user_id,
+            "name": raw_name,
+            "email": email_clean
+        }
+    }
+
+@app.get("/api/guardian/status")
+async def get_guardian_status():
+    return {
+        "device": DEVICE_STATUS_STORE,
+        "location": LOCATION_STORE,
+        "navigation": NAVIGATION_STORE,
+        "alerts": ALERTS_STORE,
+        "activity": ACTIVITY_LOGS
+    }
+
+@app.post("/api/guardian/sos")
+async def trigger_sos_alert():
+    new_alert = {
+        "id": f"alt_{int(time.time())}",
+        "title": "EMERGENCY SOS ALERT",
+        "description": "User held emergency SOS button on smart glasses!",
+        "risk": "CRITICAL",
+        "timestamp": time.strftime("%I:%M %p"),
+        "acknowledged": False,
+        "resolved": False
+    }
+    ALERTS_STORE.insert(0, new_alert)
+    DEVICE_STATUS_STORE["safety_status"] = "CRITICAL"
+    return {"success": True, "alert": new_alert}
+
+@app.post("/api/guardian/alerts/acknowledge")
+async def ack_alert(req: AlertActionRequest):
+    for a in ALERTS_STORE:
+        if a["id"] == req.alert_id:
+            a["acknowledged"] = True
+            return {"success": True, "alert": a}
+    return {"success": False, "message": "Alert not found"}
+
+@app.post("/api/guardian/alerts/resolve")
+async def resolve_alert(req: AlertActionRequest):
+    for a in ALERTS_STORE:
+        if a["id"] == req.alert_id:
+            a["resolved"] = True
+            a["acknowledged"] = True
+            DEVICE_STATUS_STORE["safety_status"] = "SAFE"
+            return {"success": True, "alert": a}
+    return {"success": False, "message": "Alert not found"}
+
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)

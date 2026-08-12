@@ -7,6 +7,7 @@ import {
 
 interface LandingPageProps {
   onStartDemo: () => void;
+  onOpenGuardian?: () => void;
 }
 
 const features = [
@@ -51,7 +52,7 @@ const team = [
   { name: 'Backend Dev', role: 'API & Database', initials: 'BD' },
 ];
 
-export default function LandingPage({ onStartDemo }: LandingPageProps) {
+export default function LandingPage({ onStartDemo, onOpenGuardian }: LandingPageProps) {
   return (
     <div className="min-h-screen bg-white text-slate-900">
       {/* Nav */}
@@ -71,14 +72,13 @@ export default function LandingPage({ onStartDemo }: LandingPageProps) {
             <a href="#contact" className="hover:text-primary-600 transition-colors">Contact</a>
           </div>
           <div className="flex items-center gap-3">
-            <a
-              href="/visionassist-guardian/login.html"
-              target="_blank"
-              rel="noopener noreferrer"
+            <button
+              type="button"
+              onClick={onOpenGuardian || (() => window.open('/visionassist-guardian/login.html', '_blank'))}
               className="px-4 py-2 rounded-xl border border-slate-200 text-slate-700 font-medium text-sm hover:border-primary-500 hover:text-primary-600 transition-all"
             >
               Guardian Login
-            </a>
+            </button>
             <button
               onClick={onStartDemo}
               className="px-5 py-2 rounded-xl bg-gradient-to-r from-primary-600 to-accent-500 text-white font-semibold text-sm shadow-lg shadow-primary-500/30 hover:shadow-primary-500/50 transition-all hover:scale-105"
