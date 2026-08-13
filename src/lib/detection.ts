@@ -603,7 +603,7 @@ export function drawBoundingBoxes(
 
 export async function askGemini(
   question: string,
-  video: HTMLVideoElement | null,
+  _video: HTMLVideoElement | null,
   targetLang?: string,
   chatHistory: Array<{role: string, content: string}> = [],
   assistantName: string = "Vision",

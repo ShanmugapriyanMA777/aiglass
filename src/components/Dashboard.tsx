@@ -5,15 +5,15 @@ import {
   Scan, Eye, Palette, DollarSign, MapPin, AlertTriangle,
   Navigation, Settings, BarChart3, Home, X, Download, Trash2,
   Play, Square, Clock, TrendingUp, Zap, Brain, Target,
-  CheckCircle2, AlertCircle, Loader2, ScanFace, RefreshCw, Shield, Glasses, BrainCircuit
+  CheckCircle2, AlertCircle, Loader2, ScanFace, RefreshCw, Shield, Glasses, BrainCircuit, Radio
 } from 'lucide-react';
 
-import { voiceEngine, VoicePriority } from '../lib/VoiceEngine';
+import { voiceEngine } from '../lib/VoiceEngine';
 
 import { analyzeFrame, drawBoundingBoxes, getLocalModel, type VisionResult, askGemini, generateVoiceMessage, detectCurrency, type CurrencyDetectionResult } from '../lib/detection';
-import { speak, stopSpeaking, configureSpeech, SpeechRecognitionHelper, isSpeaking } from '../lib/speech';
+import { stopSpeaking, configureSpeech, SpeechRecognitionHelper, isSpeaking } from '../lib/speech';
 import { supabase, type AppSettings, type EmergencyContact, type DetectionRecord, type ActivityLogEntry, type DetectionType } from '../lib/supabase';
-import { syncAIActivity, syncAlert, syncDeviceStatus, syncLocation } from '../lib/guardianSync';
+import { syncAIActivity, syncAlert, syncLocation } from '../lib/guardianSync';
 import { LocationEngine, type TrustedLocation } from '../lib/LocationEngine';
 import { GpsDiagnosticsModal } from './GpsDiagnosticsModal';
 import MapPanel from './MapPanel';
@@ -100,12 +100,30 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
   const [currencyHistory, setCurrencyHistory] = useState<Array<{time: string, text: string, conf: number}>>([]);
   const lastSpokenCurrency = useRef<string>('');
   const currencyIntervalRef = useRef<number>(0);
+
+  // Street Object Awareness States
+  const [streetAwarenessOn, setStreetAwarenessOn] = useState<boolean>(true);
+  const [streetObjects, setStreetObjects] = useState<Array<{
+    class: string;
+    position: string;
+    distance: string;
+    distance_meters: number;
+    danger: string;
+    confidence: number;
+    should_announce: boolean;
+    announcement: string;
+    bbox: number[];
+  }>>([]);
+  const streetAwarenessRef = useRef(true);
+  useEffect(() => {
+    streetAwarenessRef.current = streetAwarenessOn;
+  }, [streetAwarenessOn]);
   
   // AI Companion States
   const [aiHistory, setAiHistory] = useState<Array<{role: string, content: string}>>([]);
   const [lastInteractionTime, setLastInteractionTime] = useState<number>(Date.now());
   const [aiMood, setAiMood] = useState<'Calm' | 'Alert' | 'Thinking' | 'Speaking'>('Calm');
-  const [aiConfidence, setAiConfidence] = useState<number>(100);
+  const [aiConfidence] = useState<number>(100);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [voiceMessage, setVoiceMessage] = useState('');
   const [settings, setSettings] = useState<AppSettings & { 
@@ -113,6 +131,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     home_address?: string;
     college_address?: string;
     favorite_place?: string;
+    guardian_address?: string;
     assistant_name?: string;
     proactive_mode?: boolean;
   }>({
@@ -127,6 +146,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     home_address: '',
     college_address: '',
     favorite_place: '',
+    guardian_address: '',
     assistant_name: 'Vision',
     proactive_mode: true
   });
@@ -309,6 +329,28 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       voiceEngine.general(result.scene_description);
       setSceneText(result.scene_description);
     }
+
+    // Street Object Awareness processing
+    if (result.street_objects && result.street_objects.length > 0) {
+      setStreetObjects(result.street_objects);
+
+      // Voice announce objects if street awareness mode is on
+      if (streetAwarenessRef.current) {
+        result.street_objects.forEach((obj: any) => {
+          if (obj.should_announce && obj.announcement) {
+            if (obj.danger === 'high') {
+              voiceEngine.safety(obj.announcement);
+            } else if (obj.danger === 'medium') {
+              voiceEngine.general(obj.announcement);
+            } else {
+              voiceEngine.general(obj.announcement);
+            }
+          }
+        });
+      }
+    } else {
+      setStreetObjects([]);
+    }
   }, []);
 
   // Frame capture and dispatch loop (500ms intervals)
@@ -388,6 +430,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         home_address?: string;
         college_address?: string;
         favorite_place?: string;
+        guardian_address?: string;
       } = {
         voice_speed: 1.0,
         voice_lang: 'en-US',
@@ -399,7 +442,8 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         voice_automation: false,
         home_address: '',
         college_address: '',
-        favorite_place: ''
+        favorite_place: '',
+        guardian_address: ''
       };
       try {
         const { data, error: fetchErr } = await supabase.from('app_settings').select('*').limit(1).maybeSingle();
@@ -426,6 +470,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
           loadedSettings.home_address = parsed.home_address || '';
           loadedSettings.college_address = parsed.college_address || '';
           loadedSettings.favorite_place = parsed.favorite_place || '';
+          loadedSettings.guardian_address = parsed.guardian_address || '';
         } catch {
           console.debug('Failed to parse settings');
         }
@@ -1055,27 +1100,46 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         setSosSent(true);
         speakIfNotMuted('Emergency activated. Location shared. Calling emergency contact.');
 
-        // Automatically map route to nearest hospital
+        // Automatically map route to guardian address if configured, else fall back to nearest hospital
         try {
-          const places = await searchPlaces('hospital', latitude, longitude);
-          if (places.length > 0) {
-            const nearestHosp = places[0];
-            setDestinationCoords([nearestHosp.latitude, nearestHosp.longitude]);
-            const route = await getWalkingRoute([latitude, longitude], [nearestHosp.latitude, nearestHosp.longitude]);
+          const addressToRoute = settings.guardian_address ? settings.guardian_address.trim() : '';
+          let targetPlace = null;
+          let placeTypeMsg = '';
+
+          if (addressToRoute) {
+            const places = await searchPlaces(addressToRoute, latitude, longitude);
+            if (places.length > 0) {
+              targetPlace = places[0];
+              placeTypeMsg = `guardian address: ${targetPlace.name.split(',')[0]}`;
+            }
+          }
+
+          if (!targetPlace) {
+            // Fall back to hospital
+            const places = await searchPlaces('hospital', latitude, longitude);
+            if (places.length > 0) {
+              targetPlace = places[0];
+              placeTypeMsg = `closest hospital: ${targetPlace.name.split(',')[0]}`;
+            }
+          }
+
+          if (targetPlace) {
+            setDestinationCoords([targetPlace.latitude, targetPlace.longitude]);
+            const route = await getWalkingRoute([latitude, longitude], [targetPlace.latitude, targetPlace.longitude]);
             setRouteCoords(route.coordinates);
             setRouteSteps(route.steps);
-            setNavDestination(nearestHosp.name.split(',')[0]);
+            setNavDestination(targetPlace.name.split(',')[0]);
             setDistanceRemaining(route.distance);
             setEtaMinutes(Math.ceil(route.duration / 60));
             setNavActive(true);
             setIsSimulatingWalk(true);
             setNavStep(0);
             setSimulatedLoc([latitude, longitude]);
-            setCurrentRoadName(route.steps[0]?.instruction || 'Routing to medical facility');
-            speakIfNotMuted(`Routing emergency navigation to closest hospital: ${nearestHosp.name.split(',')[0]}`);
+            setCurrentRoadName(route.steps[0]?.instruction || 'Routing emergency location');
+            speakIfNotMuted(`Routing emergency navigation to ${placeTypeMsg}`);
           }
         } catch (err) {
-          console.warn('Emergency hospital routing failed:', err);
+          console.warn('Emergency routing failed:', err);
         }
       },
       async () => {
@@ -1088,7 +1152,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         speakIfNotMuted('Emergency alert sent. Location unavailable.');
       }
     );
-  }, [speakIfNotMuted]);
+  }, [speakIfNotMuted, settings]);
 
   // Fall Detection
   const handleFallDetection = useCallback(() => {
@@ -2078,17 +2142,36 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
                   { id: 'currency', icon: DollarSign, label: 'Currency', action: handleCurrency },
                   { id: 'face', icon: ScanFace, label: 'Face', action: handleFace },
                   { id: 'voice', icon: Mic, label: listening ? 'Listening...' : settings.voice_automation ? 'Auto Voice' : 'Voice', action: handleVoiceCommand },
+                  { id: 'street', icon: Navigation, label: streetAwarenessOn ? 'Street: ON' : 'Street: OFF', action: () => {
+                    setStreetAwarenessOn(prev => {
+                      const newVal = !prev;
+                      if (newVal) {
+                        voiceEngine.command('Street awareness mode activated. I will announce nearby objects as we walk.');
+                      } else {
+                        voiceEngine.command('Street awareness mode paused.');
+                      }
+                      return newVal;
+                    });
+                  }},
                 ].map((f) => (
                   <button
                     key={f.id}
                     onClick={f.action}
                     disabled={!cameraOn || analyzing}
                     className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all disabled:opacity-40 ${
-                      activeFeature === f.id ? 'bg-primary-50 border-primary-300' : 'border-slate-200 hover:border-primary-200 hover:bg-primary-50/50'
+                      f.id === 'street'
+                        ? (streetAwarenessOn ? 'bg-success-50 border-success-300 ring-2 ring-success-200' : 'border-slate-200 hover:border-primary-200 hover:bg-primary-50/50')
+                        : (activeFeature === f.id ? 'bg-primary-50 border-primary-300' : 'border-slate-200 hover:border-primary-200 hover:bg-primary-50/50')
                     }`}
                   >
-                    <f.icon className={`w-5 h-5 ${activeFeature === f.id ? 'text-primary-600' : 'text-slate-500'}`} />
-                    <span className="text-xs font-medium text-slate-600">{f.label}</span>
+                    <f.icon className={`w-5 h-5 ${
+                      f.id === 'street'
+                        ? (streetAwarenessOn ? 'text-success-600 animate-pulse' : 'text-slate-500')
+                        : (activeFeature === f.id ? 'text-primary-600' : 'text-slate-500')
+                    }`} />
+                    <span className={`text-xs font-medium ${
+                      f.id === 'street' && streetAwarenessOn ? 'text-success-700 font-bold' : 'text-slate-600'
+                    }`}>{f.label}</span>
                   </button>
                 ))}
               </div>
@@ -2627,6 +2710,92 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
               </div>
             </div>
 
+            {/* Card 5: Live Street Objects */}
+            <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 space-y-2 hover:shadow-md transition-shadow">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                  <Navigation className="w-4 h-4 text-primary-600" /> Live Street Objects
+                  <span className={`ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                    streetAwarenessOn ? 'bg-success-100 text-success-700 border border-success-200' : 'bg-slate-200 text-slate-500 border border-slate-300'
+                  }`}>
+                    {streetAwarenessOn ? 'ACTIVE' : 'PAUSED'}
+                  </span>
+                </h4>
+                <span className="text-[10px] font-mono text-slate-400">
+                  {streetObjects.length} object{streetObjects.length !== 1 ? 's' : ''} detected
+                </span>
+              </div>
+
+              {streetObjects.length > 0 ? (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
+                  {streetObjects.map((obj, idx) => {
+                    const iconMap: Record<string, string> = {
+                      car: '🚗', bus: '🚌', truck: '🚛', motorcycle: '🏍️',
+                      bicycle: '🚲', person: '🚶', dog: '🐕', cat: '🐈',
+                      bench: '🪑', 'fire hydrant': '🧯', pole: '🔦',
+                      'stop sign': '🛑', 'parking meter': '🅿️',
+                      umbrella: '☂️', backpack: '🎒', handbag: '👜',
+                      suitcase: '🧳', 'traffic light': '🚦'
+                    };
+                    const dangerColors: Record<string, string> = {
+                      high: 'border-error-300 bg-error-50',
+                      medium: 'border-warning-300 bg-warning-50',
+                      low: 'border-slate-200 bg-white'
+                    };
+                    const distColors: Record<string, string> = {
+                      'very close': 'bg-error-500 text-white',
+                      close: 'bg-warning-500 text-white',
+                      medium: 'bg-primary-500 text-white',
+                      far: 'bg-slate-300 text-slate-700'
+                    };
+                    const posArrow: Record<string, string> = {
+                      left: '⬅️', center: '⬆️', right: '➡️'
+                    };
+
+                    return (
+                      <div
+                        key={`${obj.class}-${obj.position}-${idx}`}
+                        className={`rounded-xl border-2 p-2.5 flex flex-col items-center gap-1 transition-all duration-300 hover:shadow-md ${
+                          dangerColors[obj.danger] || 'border-slate-200 bg-white'
+                        } ${obj.should_announce ? 'animate-pulse ring-2 ring-primary-300' : ''}`}
+                      >
+                        <span className="text-2xl">{iconMap[obj.class] || '📦'}</span>
+                        <span className="text-[11px] font-bold text-slate-800 capitalize text-center leading-tight">
+                          {obj.class}
+                        </span>
+                        <div className="flex items-center gap-1">
+                          <span className="text-sm">{posArrow[obj.position] || '⬆️'}</span>
+                          <span className="text-[10px] text-slate-500 font-medium capitalize">{obj.position}</span>
+                        </div>
+                        <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full ${
+                          distColors[obj.distance] || 'bg-slate-200 text-slate-600'
+                        }`}>
+                          {obj.distance} ({obj.distance_meters}m)
+                        </span>
+                        <div className="w-full bg-slate-200 rounded-full h-1 mt-0.5">
+                          <div
+                            className={`h-1 rounded-full transition-all duration-500 ${
+                              obj.danger === 'high' ? 'bg-error-500' :
+                              obj.danger === 'medium' ? 'bg-warning-500' : 'bg-success-500'
+                            }`}
+                            style={{ width: `${Math.round(obj.confidence * 100)}%` }}
+                          />
+                        </div>
+                        <span className="text-[8px] text-slate-400 font-mono">
+                          {Math.round(obj.confidence * 100)}%
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="flex items-center justify-center py-6 text-slate-400 text-sm">
+                  <Navigation className="w-4 h-4 mr-2 animate-spin" />
+                  Scanning for street objects...
+                </div>
+              )}
+            </div>
+
             {/* Bottom Bar: Voice Queue indicator */}
             <div className="bg-slate-950 text-slate-300 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3 text-xs shadow-inner border border-slate-800">
               <div className="flex items-center gap-2">
@@ -2831,6 +3000,7 @@ function SettingsView({ onBack, settings, setSettings, contacts, setContacts, re
     home_address?: string;
     college_address?: string;
     favorite_place?: string;
+    guardian_address?: string;
   };
   setSettings: (s: any) => void;
   contacts: EmergencyContact[];
@@ -2843,6 +3013,7 @@ function SettingsView({ onBack, settings, setSettings, contacts, setContacts, re
     home_address?: string;
     college_address?: string;
     favorite_place?: string;
+    guardian_address?: string;
   }>(settings);
   const [newContact, setNewContact] = useState({ name: '', phone: '', relation: '' });
   const [openRouterKey, setOpenRouterKey] = useState('');
@@ -2871,7 +3042,7 @@ function SettingsView({ onBack, settings, setSettings, contacts, setContacts, re
     localStorage.setItem('visionassist_settings', JSON.stringify(local));
     try {
       const { data } = await supabase.from('app_settings').select('id').limit(1).maybeSingle();
-      const { voice_automation, home_address, college_address, favorite_place, ...dbSettings } = local;
+      const { voice_automation, home_address, college_address, favorite_place, guardian_address, ...dbSettings } = local;
       if (data?.id) {
         await supabase.from('app_settings').update({ ...dbSettings, updated_at: new Date().toISOString() }).eq('id', data.id);
       } else {
@@ -3070,6 +3241,12 @@ function SettingsView({ onBack, settings, setSettings, contacts, setContacts, re
                 <label className="text-sm font-medium text-slate-600 block mb-2">Favorite Place Address / Destination</label>
                 <input type="text" placeholder="e.g. Apollo Hospital" value={local.favorite_place || ''}
                   onChange={(e) => setLocal({ ...local, favorite_place: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-primary-300 focus:outline-none" />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-600 block mb-2">Guardian Address (For SOS Emergency Navigation)</label>
+                <input type="text" placeholder="e.g. 123 Guardian Way, Chennai" value={local.guardian_address || ''}
+                  onChange={(e) => setLocal({ ...local, guardian_address: e.target.value })}
                   className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-primary-300 focus:outline-none" />
               </div>
             </div>

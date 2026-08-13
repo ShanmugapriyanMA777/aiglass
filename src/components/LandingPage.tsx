@@ -2,7 +2,7 @@ import { motion } from 'framer-motion';
 import {
   Eye, Scan, MapPin, Mic, Bell, Palette, DollarSign, Users,
   Zap, Brain, Camera, Volume2, Shield, Cpu, Code2, Database,
-  Github, Mail, Phone, ArrowRight, Activity, Glasses,
+  Github, Mail, ArrowRight, Activity, Glasses,
 } from 'lucide-react';
 
 interface LandingPageProps {
@@ -68,7 +68,6 @@ export default function LandingPage({ onStartDemo }: LandingPageProps) {
             <a href="#technology" className="hover:text-primary-600 transition-colors">Technology</a>
             <a href="#benefits" className="hover:text-primary-600 transition-colors">Benefits</a>
             <a href="#team" className="hover:text-primary-600 transition-colors">Team</a>
-            <a href="#contact" className="hover:text-primary-600 transition-colors">Contact</a>
           </div>
           <button
             onClick={onStartDemo}
@@ -336,36 +335,6 @@ export default function LandingPage({ onStartDemo }: LandingPageProps) {
                 <h3 className="font-bold">{m.name}</h3>
                 <p className="text-sm text-slate-500">{m.role}</p>
               </motion.div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* Contact */}
-      <section id="contact" className="py-20">
-        <div className="max-w-4xl mx-auto px-6">
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            className="text-center mb-12"
-          >
-            <h2 className="text-4xl font-bold mb-4">Get in Touch</h2>
-            <p className="text-lg text-slate-600">Have questions about VisionAssist? Reach out to us.</p>
-          </motion.div>
-          <div className="grid md:grid-cols-3 gap-6">
-            {[
-              { icon: Mail, label: 'Email', value: 'team@visionassist.ai' },
-              { icon: Phone, label: 'Phone', value: '+91 98765 43210' },
-              { icon: Github, label: 'GitHub', value: 'github.com/visionassist' },
-            ].map((c) => (
-              <div key={c.label} className="flex flex-col items-center p-6 rounded-2xl bg-white card-shadow border border-slate-100">
-                <div className="w-12 h-12 rounded-xl bg-primary-50 flex items-center justify-center mb-3">
-                  <c.icon className="w-6 h-6 text-primary-600" />
-                </div>
-                <div className="text-sm text-slate-500 mb-1">{c.label}</div>
-                <div className="font-semibold text-slate-700">{c.value}</div>
-              </div>
             ))}
           </div>
         </div>
