@@ -481,18 +481,28 @@ export async function analyzeFrame(
   }
 }
 
+export const HARM_OBJECTS = ['knife', 'scissors', 'blade', 'sharp object', 'weapon', 'gun', 'dagger', 'sword', 'broken glass', 'fire', 'cleaver', 'razor'];
+
+export function isHarmfulObject(label: string): boolean {
+  const l = (label || '').toLowerCase();
+  return HARM_OBJECTS.some(h => l.includes(h));
+}
+
 export function generateVoiceMessage(obj: DetectedObject, lang?: string): string {
   const shortLang = lang ? lang.split('-')[0].toLowerCase() : 'en';
+  const isHarm = isHarmfulObject(obj.class);
 
   if (shortLang === 'ta') {
     const objNames: Record<string, string> = {
       person: 'நபர்', chair: 'நாற்காலி', laptop: 'லேப்டாப்', backpack: 'பை',
-      bottle: 'பாட்டில்', cup: 'கப்', 'cell phone': 'தொலைபேசி', dog: 'நாய்',
-      cat: 'பூனை', car: 'கார்', bus: 'பேருந்து', truck: 'லாரி',
+      bottle: 'பாட்டில்', cup: 'கப்', 'cell phone': 'கைப்பேசி', phone: 'தொலைபேசி',
+      dog: 'நாய்', cat: 'பூனை', car: 'கார்', bus: 'பேருந்து', truck: 'லாரி',
       motorcycle: 'மோட்டார் சைக்கிள்', bicycle: 'மிதிவண்டி', book: 'புத்தகம்',
       table: 'மேஜை', tv: 'தொலைக்காட்சி', couch: 'சோபா', bed: 'கட்டில்',
       umbrella: 'குடை', clock: 'கடிகாரம்', 'stop sign': 'நிறுத்த அடையாளம்',
-      'traffic light': 'போக்குவரத்து விளக்கு', bench: 'பெஞ்ச்'
+      'traffic light': 'போக்குவரத்து விளக்கு', bench: 'பெஞ்ச்', board: 'போர்டு',
+      whiteboard: 'வெள்ளை போர்டு', blackboard: 'கரும்பலகை', projector: 'ப்ரொஜெக்டர்',
+      knife: 'கத்தி ⚠️', scissors: 'கத்தரிக்கோல் ⚠️'
     };
     const posMap: Record<string, string> = {
       center: 'உங்கள் நேர் முன்',
@@ -504,6 +514,10 @@ export function generateVoiceMessage(obj: DetectedObject, lang?: string): string
     const dist = obj.distanceMeters <= 1
       ? 'மிக அருகில் உள்ளது!'
       : `சுமார் ${obj.distanceMeters} மீட்டர் தொலைவில் உள்ளது.`;
+
+    if (isHarm) {
+      return `⚠️ ஆபத்து எச்சரிக்கை! ${pos} ஒரு ஆபத்தான பொருள் ${name} ${dist}! கவனமாக விலகி செல்லவும்!`;
+    }
     return `${pos} ஒரு ${name} ${dist}`;
   }
 
@@ -511,7 +525,9 @@ export function generateVoiceMessage(obj: DetectedObject, lang?: string): string
     const objNames: Record<string, string> = {
       person: 'व्यक्ति', chair: 'कुर्सी', laptop: 'लैपटॉप', backpack: 'बैग',
       bottle: 'बोतल', cup: 'कप', dog: 'कुत्ता', cat: 'बिल्ली',
-      car: 'कार', table: 'मेज़', book: 'किताब'
+      car: 'कार', table: 'मेज़', book: 'किताब', bench: 'बेंच',
+      board: 'बोर्ड', projector: 'प्रोजेक्टर', 'cell phone': 'मोबाइल फोन',
+      phone: 'फोन', knife: 'चाकू ⚠️', scissors: 'कैंची ⚠️'
     };
     const posMap: Record<string, string> = {
       center: 'आपके सामने', left: 'आपके बाएं', right: 'आपके दाएं'
@@ -521,12 +537,20 @@ export function generateVoiceMessage(obj: DetectedObject, lang?: string): string
     const dist = obj.distanceMeters <= 1
       ? 'बहुत पास है!'
       : `लगभग ${obj.distanceMeters} मीटर दूर है।`;
+
+    if (isHarm) {
+      return `⚠️ खतरे की चेतावनी! आपके ${pos} एक खतरनाक वस्तु ${name} ${dist}! दूर रहें और सावधान रहें!`;
+    }
     return `${pos} एक ${name} ${dist}`;
   }
 
   // English default
   const posText = obj.position === 'center' ? 'right in front of you' : `on your ${obj.position}`;
   const distText = obj.distanceMeters <= 1 ? "and it's very close!" : `about ${obj.distanceMeters} meters away.`;
+
+  if (isHarm) {
+    return `⚠️ CRITICAL DANGER: Harm causing object detected! A ${obj.class} is ${posText}, ${distText} Please exercise extreme caution!`;
+  }
   return `I see a ${obj.class} ${posText}, ${distText}`;
 }
 
@@ -534,12 +558,17 @@ export function drawBoundingBoxes(
   predictions: any[],
   canvas: HTMLCanvasElement,
   video: HTMLVideoElement,
-  confidenceThreshold: number = 0.5
+  confidenceThreshold: number = 0.5,
+  overlayData?: {
+    trafficLightColor?: string;
+    zebraState?: string;
+    vehicleOnCrossing?: boolean;
+  }
 ) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
-  // Sync canvas dimensions with video bounding box
+  // Sync canvas dimensions with video element bounds
   const rect = video.getBoundingClientRect();
   if (canvas.width !== rect.width || canvas.height !== rect.height) {
     canvas.width = rect.width;
@@ -554,51 +583,163 @@ export function drawBoundingBoxes(
   const scaleX = rect.width / videoWidth;
   const scaleY = rect.height / videoHeight;
 
+  // Street & Harm Danger Color Helper
+  const getStreetColor = (label: string) => {
+    const l = (label || '').toLowerCase();
+    if (isHarmfulObject(l)) {
+      return { border: '#dc2626', fill: '#dc2626', shadow: 'rgba(220, 38, 38, 0.8)', text: '⚠️ DANGER HARM' }; // Crimson Danger Harm
+    }
+    if (['car', 'bus', 'truck', 'motorcycle'].some(v => l.includes(v))) {
+      return { border: '#ef4444', fill: '#ef4444', shadow: 'rgba(239, 68, 68, 0.4)', text: 'HIGH DANGER' }; // High Danger Red
+    }
+    if (['bicycle', 'stop sign', 'fire hydrant', 'pole', 'parking meter', 'traffic light', 'projector', 'board'].some(c => l.includes(c))) {
+      return { border: '#f59e0b', fill: '#f59e0b', shadow: 'rgba(245, 158, 11, 0.4)', text: 'CAUTION' }; // Medium Danger Amber
+    }
+    return { border: '#10b981', fill: '#10b981', shadow: 'rgba(16, 185, 129, 0.4)', text: 'INFO' }; // Low Danger Emerald Green
+  };
+
   predictions.forEach((pred) => {
     const score = pred.score !== undefined ? pred.score : (pred.confidence !== undefined ? pred.confidence : 1.0);
     if (score < confidenceThreshold) return;
 
-    if (!pred.bbox) return;
+    let x = 0, y = 0, w = 0, h = 0;
+    if (pred.bbox && Array.isArray(pred.bbox) && pred.bbox.length === 4) {
+      // Check if [x, y, w, h] or [x1, y1, x2, y2]
+      if (pred.bbox[2] > pred.bbox[0] && pred.bbox[3] > pred.bbox[1] && pred.bbox[2] <= videoWidth) {
+        // [x1, y1, x2, y2] format
+        x = pred.bbox[0];
+        y = pred.bbox[1];
+        w = pred.bbox[2] - pred.bbox[0];
+        h = pred.bbox[3] - pred.bbox[1];
+      } else {
+        // [x, y, w, h] format
+        [x, y, w, h] = pred.bbox;
+      }
+    } else if (pred.x1 !== undefined && pred.y1 !== undefined) {
+      x = pred.x1;
+      y = pred.y1;
+      w = pred.x2 - pred.x1;
+      h = pred.y2 - pred.y1;
+    } else {
+      return;
+    }
 
-    const [x, y, w, h] = pred.bbox;
     const drawX = x * scaleX;
     const drawY = y * scaleY;
     const drawW = w * scaleX;
     const drawH = h * scaleY;
 
-    // Draw main glowing bounding box
-    ctx.strokeStyle = '#3b82f6';
-    ctx.lineWidth = 3;
+    const colors = getStreetColor(pred.class);
+
+    // Outer glow border
+    ctx.strokeStyle = colors.shadow;
+    ctx.lineWidth = 6;
     ctx.lineJoin = 'round';
     ctx.strokeRect(drawX, drawY, drawW, drawH);
 
-    // Draw shadow border
-    ctx.strokeStyle = 'rgba(59, 130, 246, 0.3)';
-    ctx.lineWidth = 6;
+    // Inner sharp border
+    ctx.strokeStyle = colors.border;
+    ctx.lineWidth = 3;
     ctx.strokeRect(drawX, drawY, drawW, drawH);
 
-    // Calculate distance and position heuristic text
+    // Calculate distance and position heuristic
     const centerX = x + w / 2;
-    let position = 'center';
-    if (centerX < videoWidth * 0.35) position = 'left';
-    else if (centerX > videoWidth * 0.65) position = 'right';
+    let position = pred.position || 'center';
+    if (!pred.position) {
+      if (centerX < videoWidth * 0.35) position = 'left';
+      else if (centerX > videoWidth * 0.65) position = 'right';
+    }
 
-    const relativeHeight = h / videoHeight;
-    const distanceMeters = Math.min(10, Math.max(0.3, Math.round((0.5 / relativeHeight) * 10) / 10));
+    let distanceMeters = pred.distance_meters || pred.distanceMeters;
+    if (distanceMeters === undefined) {
+      const relativeHeight = h / videoHeight;
+      distanceMeters = Math.min(10, Math.max(0.3, Math.round((0.5 / relativeHeight) * 10) / 10));
+    }
 
-    // Label styling
-    const label = `${pred.class} · ${distanceMeters}m · ${position}`;
+    const className = (pred.class || 'object').toUpperCase();
+    const confPct = Math.round(score * 100);
+    const label = `${className} · ${distanceMeters}m · ${position.toUpperCase()} (${confPct}%)`;
+
     ctx.font = 'bold 12px sans-serif';
     const textWidth = ctx.measureText(label).width;
 
-    // Label background
-    ctx.fillStyle = '#3b82f6';
-    ctx.fillRect(drawX, drawY - 22, textWidth + 10, 22);
+    // Label background pill
+    ctx.fillStyle = colors.fill;
+    ctx.fillRect(drawX, Math.max(0, drawY - 24), textWidth + 12, 24);
 
     // Label text
     ctx.fillStyle = '#ffffff';
-    ctx.fillText(label, drawX + 5, drawY - 6);
+    ctx.fillText(label, drawX + 6, Math.max(16, drawY - 7));
   });
+
+  // Canvas HUD overlay badges for Street Lights & Zebra Crossing
+  if (overlayData) {
+    // 1. Traffic Light Canvas Badge (Top Right)
+    if (overlayData.trafficLightColor && overlayData.trafficLightColor !== '--') {
+      const badgeX = canvas.width - 170;
+      const badgeY = 16;
+      const lightColor = overlayData.trafficLightColor;
+
+      let badgeBg = '#334155';
+      let dotColor = '#94a3b8';
+      let text = 'SIGNAL: UNKNOWN';
+
+      if (lightColor === 'RED') {
+        badgeBg = '#7f1d1d';
+        dotColor = '#ef4444';
+        text = '🔴 RED LIGHT - STOP';
+      } else if (lightColor === 'GREEN') {
+        badgeBg = '#064e3b';
+        dotColor = '#10b981';
+        text = '🟢 GREEN LIGHT - GO';
+      } else if (lightColor === 'YELLOW') {
+        badgeBg = '#78350f';
+        dotColor = '#f59e0b';
+        text = '🟡 YELLOW - PREPARE';
+      }
+
+      ctx.fillStyle = badgeBg;
+      ctx.beginPath();
+      ctx.roundRect(badgeX, badgeY, 150, 32, 8);
+      ctx.fill();
+      ctx.strokeStyle = dotColor;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 11px sans-serif';
+      ctx.fillText(text, badgeX + 10, badgeY + 20);
+    }
+
+    // 2. Zebra Crossing / Vehicle Alert Badge (Bottom Center)
+    if (overlayData.zebraState && overlayData.zebraState !== 'NONE') {
+      const badgeWidth = 240;
+      const badgeX = (canvas.width - badgeWidth) / 2;
+      const badgeY = canvas.height - 48;
+
+      let bg = '#1e293b';
+      let text = '🚶 ZEBRA CROSSING AHEAD';
+
+      if (overlayData.vehicleOnCrossing) {
+        bg = '#991b1b';
+        text = '🚨 VEHICLE ON CROSSING! STOP!';
+      } else if (overlayData.zebraState === 'AT_CROSSING') {
+        bg = '#15803d';
+        text = '🏁 AT ZEBRA CROSSING';
+      }
+
+      ctx.fillStyle = bg;
+      ctx.beginPath();
+      ctx.roundRect(badgeX, badgeY, badgeWidth, 36, 18);
+      ctx.fill();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 12px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(text, canvas.width / 2, badgeY + 22);
+      ctx.textAlign = 'left'; // Reset alignment
+    }
+  }
 }
 
 export async function askGemini(

@@ -10,7 +10,7 @@ import {
 
 import { voiceEngine } from '../lib/VoiceEngine';
 
-import { analyzeFrame, drawBoundingBoxes, getLocalModel, type VisionResult, askGemini, generateVoiceMessage, detectCurrency, type CurrencyDetectionResult } from '../lib/detection';
+import { analyzeFrame, drawBoundingBoxes, getLocalModel, type VisionResult, askGemini, generateVoiceMessage, detectCurrency, type CurrencyDetectionResult, isHarmfulObject } from '../lib/detection';
 import { stopSpeaking, configureSpeech, SpeechRecognitionHelper, isSpeaking } from '../lib/speech';
 import { supabase, type AppSettings, type EmergencyContact, type DetectionRecord, type ActivityLogEntry, type DetectionType } from '../lib/supabase';
 import { syncAIActivity, syncAlert, syncLocation } from '../lib/guardianSync';
@@ -67,6 +67,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
   const [trafficConfirmed, setTrafficConfirmed] = useState<boolean>(false);
   const [zebraCrossingState, setZebraCrossingState] = useState<string>('NONE');
   const [vehicleOnCrossing, setVehicleOnCrossing] = useState<boolean>(false);
+  const [harmAlert, setHarmAlert] = useState<{ detected: boolean; object: string; message: string } | null>(null);
   const [sceneActivePulse, setSceneActivePulse] = useState<boolean>(false);
   
   const [voiceSpeaking, setVoiceSpeaking] = useState<boolean>(false);
@@ -1046,19 +1047,32 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     setActiveFeature('objects');
     setAnalyzing(true);
     setError('');
-    speakIfNotMuted('Let me see what objects are around us.');
+    speakIfNotMuted('Analyzing surrounding objects...');
     try {
       const result = await analyzeFrame(
         videoRef.current,
-        'Identify all key objects in this image. Respond with a JSON object containing the "objects" array with class, confidence, position, and distance. Respond ONLY in the requested JSON format.',
+        'Identify all key objects in this image including bench, board, whiteboard, projector, phone, knife, scissors, and any harm-causing items. Respond with a JSON object containing the "objects" array with class, confidence, position, and distance. Respond ONLY in the requested JSON format.',
         settings.voice_lang
       );
       if (result.objects && result.objects.length > 0) {
-        speakIfNotMuted(`Detected ${result.objects.length} objects.`);
+        let harmFound = false;
         result.objects.forEach((obj) => {
+          if (isHarmfulObject(obj.class)) {
+            harmFound = true;
+            setHarmAlert({
+              detected: true,
+              object: obj.class,
+              message: `⚠️ CRITICAL HARM WARNING: ${obj.class.toUpperCase()} DETECTED!`
+            });
+            syncAlert('HARM_DETECTION', 'CRITICAL', `Harm causing object detected: ${obj.class}`, 0, 0);
+          }
           const msg = generateVoiceMessage(obj, settings.voice_lang);
           voiceEngine.general(msg);
         });
+
+        if (!harmFound) {
+          speakIfNotMuted(`Detected ${result.objects.length} objects.`);
+        }
         addHistory('object', `Detected ${result.objects.length} objects`, null, 'Objects detected');
       } else {
         speakIfNotMuted('No objects detected.');
@@ -1277,7 +1291,17 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
             const model = await getLocalModel();
             const predictions = await model.detect(videoRef.current);
             
-            drawBoundingBoxes(predictions, canvasRef.current, videoRef.current, settings.confidence_threshold);
+            drawBoundingBoxes(
+              predictions,
+              canvasRef.current,
+              videoRef.current,
+              settings.confidence_threshold,
+              {
+                trafficLightColor: trafficColor,
+                zebraState: zebraCrossingState,
+                vehicleOnCrossing
+              }
+            );
 
             if (predictions.length > 0) {
               const mapped = predictions.map((pred: any) => {
@@ -2079,6 +2103,35 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
                     ))}
                   </div>
                 )}
+                {harmAlert && harmAlert.detected && (
+                  <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 px-4 py-2.5 rounded-2xl bg-red-600/95 text-white text-xs font-black shadow-2xl backdrop-blur-md border-2 border-red-300 animate-pulse">
+                    <AlertTriangle className="w-5 h-5 text-yellow-300 animate-bounce" />
+                    <div>
+                      <span className="block text-[10px] text-red-200 uppercase tracking-widest font-black">CRITICAL HARM WARNING</span>
+                      <span className="text-sm font-black tracking-wide">{harmAlert.message}</span>
+                    </div>
+                    <button onClick={() => setHarmAlert(null)} className="ml-2 p-1 hover:bg-red-700 rounded-lg">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+                {currencyModeActive && (
+                  <div className="absolute top-3 right-3 z-30 flex flex-col items-end gap-2">
+                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-500/90 text-white text-xs font-bold shadow-lg backdrop-blur-md border border-amber-300/40 animate-pulse">
+                      <DollarSign className="w-4 h-4" />
+                      <span>Currency Scanner: Active</span>
+                    </div>
+                    {currencyData && currencyData.detected && (
+                      <div className="p-3 rounded-xl bg-slate-900/90 text-white border border-amber-500/50 shadow-2xl backdrop-blur-md max-w-xs text-right animate-bounce">
+                        <span className="block text-[10px] text-amber-400 font-bold uppercase tracking-wider">Detected Note / Coin</span>
+                        <p className="text-sm font-black text-amber-300 mt-0.5">{currencyData.currency}</p>
+                        <span className="inline-block mt-1 px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 text-[10px] font-bold border border-emerald-500/30">
+                          {Math.round((currencyData.confidence || 0.9) * 100)}% Confidence
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
                 {analyzing && (
                   <div className="absolute bottom-3 right-3 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900/80 backdrop-blur-sm z-20 border border-slate-800">
                     <Loader2 className="w-4 h-4 text-accent-400 animate-spin" />
@@ -2099,32 +2152,51 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
                   </div>
                 )}
               </div>
-              <div className="p-4 flex gap-2">
-                {!cameraOn ? (
-                  <button
-                    onClick={() => startCamera()}
-                    disabled={cameraStatus === 'starting'}
-                    className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-primary-600 to-accent-500 text-white font-semibold flex items-center justify-center gap-2 hover:shadow-lg hover:brightness-105 transition-all disabled:opacity-50"
-                  >
-                    <Play className="w-5 h-5" /> Start Camera
-                  </button>
-                ) : (
-                  <>
+              <div className="p-4 flex flex-col gap-2">
+                <div className="flex gap-2">
+                  {!cameraOn ? (
                     <button
-                      onClick={stopCamera}
-                      className="flex-1 px-4 py-3 rounded-xl bg-error-500 hover:bg-error-600 text-white font-semibold flex items-center justify-center gap-2 hover:shadow-md transition-all"
+                      onClick={() => startCamera()}
+                      disabled={cameraStatus === 'starting'}
+                      className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-primary-600 to-accent-500 text-white font-semibold flex items-center justify-center gap-2 hover:shadow-lg hover:brightness-105 transition-all disabled:opacity-50"
                     >
-                      <Square className="w-5 h-5" /> Stop Camera
+                      <Play className="w-5 h-5" /> Start Camera
                     </button>
-                    <button
-                      onClick={toggleCamera}
-                      className="px-4 py-3 rounded-xl bg-slate-100 text-slate-700 font-semibold flex items-center justify-center gap-2 hover:bg-slate-200 transition-all border border-slate-200"
-                      title="Flip Camera"
-                    >
-                      <RefreshCw className="w-5 h-5" /> Flip
-                    </button>
-                  </>
-                )}
+                  ) : (
+                    <>
+                      <button
+                        onClick={stopCamera}
+                        className="flex-1 px-4 py-3 rounded-xl bg-error-500 hover:bg-error-600 text-white font-semibold flex items-center justify-center gap-2 hover:shadow-md transition-all"
+                      >
+                        <Square className="w-5 h-5" /> Stop Camera
+                      </button>
+                      <button
+                        onClick={toggleCamera}
+                        className="px-4 py-3 rounded-xl bg-slate-100 text-slate-700 font-semibold flex items-center justify-center gap-2 hover:bg-slate-200 transition-all border border-slate-200"
+                        title="Flip Camera"
+                      >
+                        <RefreshCw className="w-5 h-5" /> Flip
+                      </button>
+                    </>
+                  )}
+                </div>
+
+                {/* Dedicated Instant Currency Detector Button */}
+                <button
+                  onClick={async () => {
+                    if (!cameraOn) {
+                      await startCamera();
+                      setTimeout(scanCurrencyNow, 1200);
+                    } else {
+                      scanCurrencyNow();
+                    }
+                  }}
+                  disabled={analyzing}
+                  className="w-full px-4 py-3 rounded-xl bg-gradient-to-r from-amber-500 via-amber-600 to-yellow-600 hover:from-amber-600 hover:to-yellow-700 text-white font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-md hover:shadow-lg transition-all active:scale-[0.99] border border-amber-400/40 disabled:opacity-50"
+                >
+                  <DollarSign className="w-5 h-5 text-yellow-200" />
+                  <span>Scan Currency Note / Coin Now</span>
+                </button>
               </div>
             </div>
 

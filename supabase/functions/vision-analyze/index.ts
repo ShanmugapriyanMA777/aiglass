@@ -24,24 +24,39 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const supabaseUrl = Deno.env.get("SUPABASE_URL") as string;
-    const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") as string;
-    const supabase = createClient(supabaseUrl, serviceRoleKey);
+    const envApiKey = Deno.env.get("OPENROUTER_API_KEY");
+    let apiKey = envApiKey;
 
-    const { data: configData, error: configError } = await supabase
-      .from("app_config")
-      .select("value")
-      .eq("key", "OPENROUTER_API_KEY")
-      .maybeSingle();
+    if (!apiKey) {
+      const supabaseUrl = Deno.env.get("SUPABASE_URL") as string;
+      const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") as string;
+      if (supabaseUrl && serviceRoleKey) {
+        try {
+          const supabase = createClient(supabaseUrl, serviceRoleKey);
+          const { data: configData, error: configError } = await supabase
+            .from("app_config")
+            .select("value")
+            .eq("key", "OPENROUTER_API_KEY")
+            .maybeSingle();
 
-    if (configError || !configData?.value) {
+          if (!configError && configData?.value) {
+            apiKey = configData.value;
+          }
+        } catch {
+          // ignore error and proceed to validation
+        }
+      }
+    }
+
+    if (!apiKey) {
       return new Response(
-        JSON.stringify({ error: "OpenRouter API key not configured in database" }),
+        JSON.stringify({
+          error: "OpenRouter API key not configured.",
+          tip: "Set OPENROUTER_API_KEY in Supabase Edge Function secrets or in the app_config table."
+        }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
-
-    const apiKey = configData.value;
 
     const defaultPrompt = `You are an AI assistant for visually impaired smart glasses. Analyze this camera frame and respond ONLY with a JSON object (no markdown, no code fences) in this exact format:
 {

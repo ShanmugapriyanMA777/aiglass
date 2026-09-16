@@ -29,7 +29,7 @@ export async function syncLocation(
 }
 
 export async function syncAlert(
-  alertType: 'SOS' | 'FALL' | 'VEHICLE_HAZARD' | 'OBSTACLE' | 'ROUTE_DEVIATION',
+  alertType: 'SOS' | 'FALL' | 'VEHICLE_HAZARD' | 'OBSTACLE' | 'ROUTE_DEVIATION' | 'HARM_DETECTION',
   severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW',
   message: string,
   latitude?: number,
