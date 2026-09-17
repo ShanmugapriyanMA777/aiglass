@@ -1727,7 +1727,7 @@ def extract_navigation_details(query: str, user_lat: Optional[float] = None, use
 
     # 3. Construct dynamic Google Maps navigation URL
     encoded_dest = urllib.parse.quote(destination)
-    gmaps_url = f"https://www.google.com/maps/dir/?api=1&destination={encoded_dest}&travelmode={mode}"
+    gmaps_url = f"https://www.google.com/maps/dir/?api=1&destination={encoded_dest}&travelmode={mode}&dir_action=navigate"
     if user_lat is not None and user_lng is not None:
         gmaps_url += f"&origin={user_lat:.6f},{user_lng:.6f}"
 

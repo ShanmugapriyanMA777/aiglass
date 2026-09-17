@@ -675,7 +675,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     }
 
     const cleanDest = destination.trim();
-    let mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(cleanDest)}`;
+    let mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(cleanDest)}&travelmode=walking&dir_action=navigate`;
     
     // Optional origin if browser geolocation coordinates are available
     const origin = originCoords || currentCoords;
@@ -683,11 +683,11 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       mapsUrl += `&origin=${origin[0].toFixed(6)},${origin[1].toFixed(6)}`;
     }
 
-    const spokenMsg = `Opening Google Maps for ${cleanDest}...`;
+    const spokenMsg = `Opening Google Maps walking navigation for ${cleanDest}...`;
     speakIfNotMuted(spokenMsg);
-    setVoiceMessage(`Opening Google Maps for ${cleanDest}...`);
+    setVoiceMessage(`Opening Google Maps walking navigation for ${cleanDest}...`);
     setLastAiResponse(spokenMsg);
-    setLastAiTool('Google Maps Navigation');
+    setLastAiTool('Google Maps Walking Navigation');
 
     addHistory('navigation', cleanDest, 0.99, 'Google Maps');
 
@@ -1731,10 +1731,10 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       return;
     } else if (normalizedCmd.includes('open in google maps') || normalizedCmd.includes('google maps') || normalizedCmd.includes('external maps')) {
       if (destinationCoords) {
-        const url = `https://www.google.com/maps/dir/?api=1&destination=${destinationCoords[0].toFixed(6)},${destinationCoords[1].toFixed(6)}&travelmode=walking` + 
+        const url = `https://www.google.com/maps/dir/?api=1&destination=${destinationCoords[0].toFixed(6)},${destinationCoords[1].toFixed(6)}&travelmode=walking&dir_action=navigate` + 
           (currentCoords ? `&origin=${currentCoords[0].toFixed(6)},${currentCoords[1].toFixed(6)}` : '');
         AssistantRouter.launchGoogleMaps(url);
-        speakIfNotMuted('Opening route in Google Maps.');
+        speakIfNotMuted('Opening walking navigation in Google Maps.');
       } else {
         speakIfNotMuted('No destination is currently active to open in Google Maps.');
       }

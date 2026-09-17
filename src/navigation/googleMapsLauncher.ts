@@ -33,7 +33,7 @@ export function generateGoogleMapsUrl(
 ): string {
   const cleanDest = destination.trim();
   const encodedDest = encodeURIComponent(cleanDest);
-  let url = `https://www.google.com/maps/dir/?api=1&destination=${encodedDest}&travelmode=${travelMode}`;
+  let url = `https://www.google.com/maps/dir/?api=1&destination=${encodedDest}&travelmode=${travelMode}&dir_action=navigate`;
 
   if (userCoords && Array.isArray(userCoords) && userCoords.length === 2 && !isNaN(userCoords[0]) && !isNaN(userCoords[1])) {
     url += `&origin=${userCoords[0].toFixed(6)},${userCoords[1].toFixed(6)}`;
