@@ -1,0 +1,19 @@
+# Vercel Deployment Ignore Rules
+# Exclude heavy machine learning checkpoints & local artifacts to keep serverless function bundle under size limit
+
+runs/
+*.pt
+*.pth
+*.torchscript
+*.part
+backend/*.pt
+backend/*.pth
+backend/currency_model.pth
+backend/__pycache__/
+__pycache__/
+node_modules/
+.git/
+.github/
+dist/
+tests/
+*.log
