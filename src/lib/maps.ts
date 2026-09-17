@@ -73,34 +73,47 @@ export async function searchPlaces(
     const baseLon = longitude || 80.2454;
 
     const mockPlaces: Record<string, MapLocation[]> = {
+      'agni': [
+        { name: 'Agni College of Technology, Thalambur, Chennai', latitude: 12.8227, longitude: 80.2201, type: 'university' }
+      ],
+      'chennai central': [
+        { name: 'Chennai Central Railway Station', latitude: 13.0827, longitude: 80.2707, type: 'transit_station' }
+      ],
+      'central': [
+        { name: 'Chennai Central Railway Station', latitude: 13.0827, longitude: 80.2707, type: 'transit_station' }
+      ],
+      'marina': [
+        { name: 'Marina Beach, Triplicane, Chennai', latitude: 13.0500, longitude: 80.2824, type: 'tourist_attraction' }
+      ],
       'atm': [
-        { name: 'State Bank of India ATM, Tech Corridor', latitude: baseLat + 0.002, longitude: baseLon + 0.001, type: 'atm' },
+        { name: 'State Bank of India ATM, Opposite Agni College Gate', latitude: 12.8235, longitude: 80.2210, type: 'atm' },
         { name: 'HDFC Bank ATM, Cross Road', latitude: baseLat - 0.001, longitude: baseLon + 0.003, type: 'atm' },
       ],
       'hospital': [
-        { name: 'Apollo Speciality Hospital, Main Road', latitude: baseLat + 0.006, longitude: baseLon - 0.004, type: 'hospital' },
-        { name: 'Fortis Healthcare Center', latitude: baseLat - 0.008, longitude: baseLon + 0.005, type: 'hospital' },
+        { name: 'Apollo Speciality Hospital, Greams Road', latitude: 13.0583, longitude: 80.2520, type: 'hospital' },
+        { name: 'Apollo Speciality Hospital, Vanagaram', latitude: 13.0645, longitude: 80.1472, type: 'hospital' },
+        { name: 'Apollo Speciality Hospital, OMR Perungudi', latitude: 12.9620, longitude: 80.2450, type: 'hospital' },
       ],
       'pharmacy': [
-        { name: 'MedPlus Pharmacy, Sector 2', latitude: baseLat + 0.001, longitude: baseLon + 0.002, type: 'pharmacy' },
-        { name: 'Apollo Pharmacy, Central Market', latitude: baseLat - 0.002, longitude: baseLon - 0.001, type: 'pharmacy' },
+        { name: 'MedPlus Pharmacy, Thalambur Main Road', latitude: 12.8300, longitude: 80.2250, type: 'pharmacy' },
+        { name: 'Apollo Pharmacy, OMR Navalur', latitude: 12.8450, longitude: 80.2280, type: 'pharmacy' },
+      ],
+      'police': [
+        { name: 'Thalambur Police Station, Karanai Main Road', latitude: 12.8310, longitude: 80.2180, type: 'police' }
       ],
       'restaurant': [
         { name: 'Grand Veg Restaurant, Food Street', latitude: baseLat + 0.003, longitude: baseLon + 0.004, type: 'restaurant' },
         { name: 'Star Coffee Cafe', latitude: baseLat - 0.003, longitude: baseLon + 0.001, type: 'restaurant' },
       ],
       'bus stop': [
-        { name: 'College Bus Stop, Campus Gate', latitude: baseLat + 0.0015, longitude: baseLon - 0.001, type: 'bus_stop' },
+        { name: 'Thalambur Bus Stop, Agni College Road', latitude: 12.8240, longitude: 80.2195, type: 'bus_stop' },
         { name: 'Junction Terminal Stop', latitude: baseLat - 0.004, longitude: baseLon + 0.004, type: 'bus_stop' },
-      ],
-      'agni college': [
-        { name: 'Agni College of Technology, Thalambur, Chennai', latitude: 12.8227, longitude: 80.2201, type: 'university' }
       ]
     };
 
     const q = query.toLowerCase();
     for (const key of Object.keys(mockPlaces)) {
-      if (q.includes(key)) {
+      if (q.includes(key) || key.includes(q)) {
         return mockPlaces[key];
       }
     }
@@ -108,13 +121,34 @@ export async function searchPlaces(
     // Default mock destination
     return [
       {
-        name: `${query} (Simulated Location)`,
+        name: `${query} (Local Search Estimate)`,
         latitude: baseLat + 0.005,
         longitude: baseLon + 0.005,
         type: 'place',
       },
     ];
   }
+}
+
+/**
+ * Builds Google Maps external navigation URL
+ */
+export function buildGoogleMapsUrl(
+  startLat: number | null | undefined,
+  startLng: number | null | undefined,
+  destLat: number,
+  destLng: number,
+  mode: 'walking' | 'driving' | 'transit' = 'walking'
+): string {
+  const params = new URLSearchParams({
+    api: '1',
+    destination: `${destLat.toFixed(6)},${destLng.toFixed(6)}`,
+    travelmode: mode
+  });
+  if (startLat != null && startLng != null) {
+    params.append('origin', `${startLat.toFixed(6)},${startLng.toFixed(6)}`);
+  }
+  return `https://www.google.com/maps/dir/?${params.toString()}`;
 }
 
 /**

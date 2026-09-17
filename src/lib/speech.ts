@@ -642,31 +642,32 @@ export function isSpeaking() {
 }
 
 export type SpeechRecognitionCallback = (transcript: string) => void;
+export type SpeechRecognitionInterimCallback = (interim: string) => void;
 
 export class SpeechRecognitionHelper {
   private recognition: any = null;
   private callback: SpeechRecognitionCallback | null = null;
   private onEndCallback: (() => void) | null = null;
+  private onInterimCallback: SpeechRecognitionInterimCallback | null = null;
+  private onErrorCallback: ((error: string) => void) | null = null;
   private active = false;
   private running = false;
   private silenceTimer: ReturnType<typeof setTimeout> | null = null;
   private finalTranscript = '';
   private readonly silenceMs: number;
-  private isContinuousMode = false;
+  private isContinuousMode = true;
   private wakeWord = 'hey vision';
-  private requiresWakeWord = true;
+  private requiresWakeWord = false;
 
-  constructor(silenceMs = 1200) {
+  constructor(silenceMs = 1000) {
     this.silenceMs = silenceMs;
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (SR) {
       this.recognition = new SR();
-      // Continuous so the user can speak a full sentence
       this.recognition.continuous = true;
-      // Interim results let us detect pauses in speech
       this.recognition.interimResults = true;
       this.recognition.maxAlternatives = 1;
-      this.recognition.lang = currentSettings.lang;
+      this.recognition.lang = currentSettings.lang || 'en-US';
     }
   }
 
@@ -683,19 +684,26 @@ export class SpeechRecognitionHelper {
 
   private _commitTranscript() {
     this._clearSilenceTimer();
-    let text = this.finalTranscript.trim().toLowerCase();
+    const text = this.finalTranscript.trim();
     this.finalTranscript = '';
     
     if (text && this.active && this.callback) {
+      const lower = text.toLowerCase();
       if (this.requiresWakeWord) {
-        if (text.includes(this.wakeWord)) {
-          // Speak "Yes, I'm listening." if they only said the wake word, or just process the rest
-          const stripped = text.replace(new RegExp(`.*${this.wakeWord}`, 'i'), '').trim();
-          if (stripped.length > 0) {
-            this.callback(stripped);
-          } else {
-            // They just said the wake word.
-            this.callback(this.wakeWord);
+        const wakeWords = ['hey vision', 'vision', 'assistant', 'ok vision', 'hello vision'];
+        const matched = wakeWords.find(w => lower.includes(w));
+        if (matched) {
+          const stripped = text.replace(new RegExp(`.*${matched}`, 'i'), '').trim();
+          this.callback(stripped.length > 0 ? stripped : text);
+        } else {
+          // In continuous mode, if it sounds like a command, still trigger it
+          if (
+            lower.includes('navigate') || lower.includes('where') || lower.includes('what') ||
+            lower.includes('describe') || lower.includes('read') || lower.includes('color') ||
+            lower.includes('currency') || lower.includes('help') || lower.includes('stop') ||
+            lower.includes('who') || lower.includes('tell') || lower.includes('how')
+          ) {
+            this.callback(text);
           }
         }
       } else {
@@ -703,37 +711,35 @@ export class SpeechRecognitionHelper {
       }
     }
     
-    // In continuous background mode, do not stop on commit, just let it keep listening
     if (!this.isContinuousMode) {
       this.stop();
     }
   }
 
-  setContinuousMode(continuous: boolean, requireWakeWord: boolean, wakeWord: string = 'hey vision') {
+  setContinuousMode(continuous: boolean, requireWakeWord: boolean = false, wakeWord: string = 'hey vision') {
     this.isContinuousMode = continuous;
     this.requiresWakeWord = requireWakeWord;
     this.wakeWord = wakeWord.toLowerCase();
   }
 
-  start(callback: SpeechRecognitionCallback, onEnd?: () => void) {
+  start(callback: SpeechRecognitionCallback, onEnd?: () => void, onInterim?: SpeechRecognitionInterimCallback, onError?: (err: string) => void) {
     if (!this.recognition) return;
-
-    // If already running, stop safely first
-    if (this.running) {
-      try { this.recognition.stop(); } catch (_) {}
-    }
 
     this.callback = callback;
     this.onEndCallback = onEnd || null;
+    this.onInterimCallback = onInterim || null;
+    this.onErrorCallback = onError || null;
     this.active = true;
-    this.running = true;
     this.finalTranscript = '';
-    this.recognition.lang = currentSettings.lang;
+    this.recognition.lang = currentSettings.lang || 'en-US';
+
+    if (this.running) {
+      return;
+    }
 
     this.recognition.onresult = (e: any) => {
       if (!this.active) return;
 
-      // Accumulate final results; ignore interim
       let interimTranscript = '';
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const result = e.results[i];
@@ -744,11 +750,14 @@ export class SpeechRecognitionHelper {
         }
       }
 
-      // Every time we get speech (final or interim) reset the silence timer
+      const combined = (this.finalTranscript + interimTranscript).trim();
+      if (combined && this.onInterimCallback) {
+        this.onInterimCallback(combined);
+      }
+
       this._clearSilenceTimer();
       if (this.active) {
         this.silenceTimer = setTimeout(() => {
-          // Use final transcript; if none accumulated yet but interim exists, use that
           if (!this.finalTranscript.trim() && interimTranscript.trim()) {
             this.finalTranscript = interimTranscript;
           }
@@ -758,34 +767,46 @@ export class SpeechRecognitionHelper {
     };
 
     this.recognition.onerror = (e: any) => {
-      console.warn('Speech recognition error:', e.error);
+      console.warn('[Speech Recognition Error]:', e.error);
       this._clearSilenceTimer();
+      if (this.onErrorCallback) {
+        this.onErrorCallback(e.error || 'error');
+      }
       if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
         this.active = false;
         this.running = false;
       }
-      // On network or audio-capture errors, let onend restart the loop
     };
 
     this.recognition.onend = () => {
       this.running = false;
-      // If we have pending transcript, commit it
       if (this.finalTranscript.trim() && this.active) {
         this._clearSilenceTimer();
         this._commitTranscript();
       }
       
       if (this.active && this.isContinuousMode) {
-        // Automatically restart if it was stopped by the browser and we are in continuous mode
-        try {
-          this.recognition.start();
-        } catch (e) {
-          console.warn('Speech recognition restart error:', e);
-        }
+        setTimeout(() => {
+          if (this.active && !this.running) {
+            try {
+              this.recognition.start();
+              this.running = true;
+            } catch (err) {
+              // ignore duplicate start error
+            }
+          }
+        }, 200);
       } else if (this.active && this.onEndCallback) {
         this.onEndCallback();
       }
     };
+
+    try {
+      this.recognition.start();
+      this.running = true;
+    } catch (e) {
+      console.warn('SpeechRecognition start error:', e);
+    }
 
     if (!navigator.onLine) {
       // OFFLINE MODE: Fallback to simulated offline mic capture or backend STT if available

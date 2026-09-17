@@ -1,8 +1,6 @@
-import React, { useState } from 'react';
-import { MapPin, Navigation, Radio, Shield, Compass, LocateFixed, Layers } from 'lucide-react';
+import { MapPin, Radio, Compass, LocateFixed } from 'lucide-react';
 
 export default function GuardianTracking() {
-  const [zoomLevel, setZoomLevel] = useState(15);
   
   // Current user GPS coords
   const lat = 12.9716;

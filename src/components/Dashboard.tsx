@@ -5,7 +5,8 @@ import {
   Scan, Eye, Palette, DollarSign, MapPin, AlertTriangle,
   Navigation, Settings, BarChart3, Home, X, Download, Trash2,
   Play, Square, Clock, TrendingUp, Zap, Brain, Target,
-  CheckCircle2, AlertCircle, Loader2, ScanFace, RefreshCw, Shield, Glasses, BrainCircuit, Radio
+  CheckCircle2, AlertCircle, Loader2, ScanFace, RefreshCw, Shield, Glasses, BrainCircuit, Radio,
+  ExternalLink
 } from 'lucide-react';
 
 import { voiceEngine } from '../lib/VoiceEngine';
@@ -19,6 +20,8 @@ import { GpsDiagnosticsModal } from './GpsDiagnosticsModal';
 import MapPanel from './MapPanel';
 import { searchPlaces, getWalkingRoute, getDistanceMeters, type NavigationStep } from '../lib/maps';
 import { getItem, setItem } from '../lib/storage';
+import { AssistantRouter } from '../lib/assistantRouter';
+import { navigationService, parseNavigationIntent } from '../navigation';
 
 interface DashboardProps {
   onExit: () => void;
@@ -57,8 +60,14 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
   const [speakingState, setSpeakingState] = useState(false);
   const [ocrText, setOcrText] = useState('');
 
+  // Multimodal Vision LLM & Wolfram|Alpha states
+  const [lastAiResponse, setLastAiResponse] = useState<string>('');
+  const [lastAiTool, setLastAiTool] = useState<string>('');
+  const [lastAiLatency, setLastAiLatency] = useState<number>(0);
+  const [isAiThinking, setIsAiThinking] = useState<boolean>(false);
+
   // Scene Understanding states & voice queue refs
-    const mutedRef = useRef(muted);
+  const mutedRef = useRef(muted);
   useEffect(() => {
     mutedRef.current = muted;
   }, [muted]);
@@ -176,6 +185,8 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
   const [isSimulatingWalk, setIsSimulatingWalk] = useState(false);
   const [trustedLoc, setTrustedLoc] = useState<TrustedLocation | null>(null);
   const [showGpsDiagnostics, setShowGpsDiagnostics] = useState(false);
+  const [blockedPopupUrl, setBlockedPopupUrl] = useState<string | null>(null);
+  const [blockedDestination, setBlockedDestination] = useState<string>('');
 
   useEffect(() => {
     LocationEngine.startTracking('browser');
@@ -204,42 +215,6 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     return match ? match[0] : '';
   };
 
-  const triggerImmediateSceneDescription = async () => {
-    if (!videoRef.current || !canvasRef.current) return;
-    const canvas = canvasRef.current;
-    const video = videoRef.current;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
-    const base64 = dataUrl.split(',')[1];
-    
-    speakIfNotMuted("Analyzing your surroundings. Please wait.");
-
-    try {
-      const response = await fetch('http://localhost:8000/api/analyze-frame', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          frame_base64: base64,
-          nav_active: navActive,
-          destination_number: extractDoorNumber(navDestination), lang: settings.voice_lang })
-      });
-
-      if (response.ok) {
-        const result = await response.json();
-        if (result.scene_description) {
-          voiceEngine.general(result.scene_description);
-          setSceneText(result.scene_description);
-        }
-      }
-    } catch (err) {
-      console.warn('Immediate scene description call failed:', err);
-    }
-  };
 
   const processSceneResult = useCallback((result: any) => {
     if (!result) return;
@@ -255,30 +230,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     if (tl && tl.detected && tl.confirmed) {
       setTrafficColor(tl.color);
       setTrafficConfirmed(true);
-
-      const prevColor = prevTrafficColorRef.current;
-      if (tl.color !== prevColor) {
-        if (prevColor === 'RED' && tl.color === 'GREEN') {
-          voiceEngine.emergency("Light has changed to green. You may cross now.");
-        } else if (prevColor === 'GREEN' && tl.color === 'RED') {
-          voiceEngine.emergency("Light has changed to red. Please stop immediately.");
-        }
-        prevTrafficColorRef.current = tl.color;
-      }
-
-      if (tl.should_announce) {
-        if (!zc || !zc.detected) {
-          if (tl.low_light) {
-            voiceEngine.safety("Traffic signal ahead. Low light detected. Proceed carefully.");
-          } else if (tl.color === 'RED') {
-            voiceEngine.emergency("Red light ahead. Please stop and wait.");
-          } else if (tl.color === 'GREEN') {
-            voiceEngine.emergency("Green light. Safe to cross now. Walk ahead.");
-          } else if (tl.color === 'YELLOW') {
-            voiceEngine.safety("Yellow light ahead. Prepare to stop.");
-          }
-        }
-      }
+      prevTrafficColorRef.current = tl.color;
     } else {
       setTrafficColor('--');
       setTrafficConfirmed(false);
@@ -288,67 +240,23 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     if (zc) {
       setZebraCrossingState(zc.state);
       setVehicleOnCrossing(zc.vehicle_on_crossing);
-
-      if (zc.detected && zc.should_announce) {
-        if (tl && tl.detected && tl.confirmed) {
-          if (tl.color === "RED") {
-            voiceEngine.emergency("Red light at zebra crossing. Please wait on the footpath. Do not step onto the crossing.");
-          } else if (tl.color === "GREEN") {
-            voiceEngine.emergency("Green light at zebra crossing. Safe to cross now. Walk straight across.");
-          } else if (tl.color === "YELLOW") {
-            voiceEngine.safety("Yellow light at zebra crossing. Wait for green before crossing.");
-          }
-        } else {
-          if (zc.state === "APPROACHING") {
-            voiceEngine.safety("Zebra crossing detected ahead. No traffic light. Look left and right before crossing.");
-          } else if (zc.state === "AT_CROSSING") {
-            voiceEngine.safety("You are at the zebra crossing. Check for vehicles then cross carefully.");
-          }
-        }
-      }
-
-      if (zc.detected && zc.vehicle_on_crossing) {
-        voiceEngine.emergency("Vehicle on the crossing. Stop and wait. Do not cross yet.");
-      }
     } else {
       setZebraCrossingState('NONE');
       setVehicleOnCrossing(false);
     }
 
     if (result.ocr_results && result.ocr_results.length > 0) {
-      result.ocr_results.forEach((item: any) => {
-        if (item.category === "CAUTION" || item.category === "EMERGENCY") {
-          voiceEngine.safety(item.announcement);
-        } else {
-          voiceEngine.general(item.announcement);
-        }
-        setOcrText(`${item.text} (${item.category}) — ${item.direction}`);
-      });
+      const item = result.ocr_results[0];
+      setOcrText(`${item.text} (${item.category}) — ${item.direction}`);
     }
 
     if (result.scene_updated && result.scene_description) {
-      voiceEngine.general(result.scene_description);
       setSceneText(result.scene_description);
     }
 
-    // Street Object Awareness processing
+    // Street Object Awareness state update (quiet, no unprompted background chatter)
     if (result.street_objects && result.street_objects.length > 0) {
       setStreetObjects(result.street_objects);
-
-      // Voice announce objects if street awareness mode is on
-      if (streetAwarenessRef.current) {
-        result.street_objects.forEach((obj: any) => {
-          if (obj.should_announce && obj.announcement) {
-            if (obj.danger === 'high') {
-              voiceEngine.safety(obj.announcement);
-            } else if (obj.danger === 'medium') {
-              voiceEngine.general(obj.announcement);
-            } else {
-              voiceEngine.general(obj.announcement);
-            }
-          }
-        });
-      }
     } else {
       setStreetObjects([]);
     }
@@ -519,7 +427,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       setContacts(loadedContacts);
     })();
     speechHelperRef.current = new SpeechRecognitionHelper();
-    speechHelperRef.current.setContinuousMode(true, true, settings?.wake_word || 'hey vision');
+    speechHelperRef.current.setContinuousMode(true, false, settings?.wake_word || 'hey vision');
   }, []);
 
   // Load history
@@ -607,21 +515,13 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     );
   }, [settings.voice_speed, settings.voice_lang, settings.voice_pitch, settings.voice_volume]);
 
-  // Battery monitoring simulator
+  // Battery monitoring (silent state tracking)
   useEffect(() => {
     const interval = setInterval(() => {
-      setBatteryLevel(b => {
-        const next = Math.max(0, b - 1);
-        if (next === 15) {
-          speakIfNotMuted("Warning: Smart Glasses battery is low. 15% remaining.");
-        }
-        return next;
-      });
+      setBatteryLevel(b => Math.max(0, b - 1));
     }, 120000); // 1% every 2 minutes
     return () => clearInterval(interval);
-  }, [speakIfNotMuted]);
-
-
+  }, []);
 
   // Camera start
   const startCamera = useCallback(async (mode?: 'user' | 'environment') => {
@@ -644,37 +544,12 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       }
       setCameraOn(true);
       setCameraStatus('on');
-      speakIfNotMuted('My camera is on! I am taking a look around for you.');
-
-      // Start periodic high-level cloud analysis (runs every 8 seconds for scene details)
-      const analyzeCloud = async () => {
-        if (!streamRef.current || !videoRef.current || isAnalyzingRef.current) return;
-        isAnalyzingRef.current = true;
-        setAnalyzing(true);
-        try {
-          const result = await analyzeFrame(videoRef.current, 'Act as a friendly, caring assistant. Describe this scene naturally in 1-2 sentences as if speaking to a friend who is visually impaired.', settings.voice_lang);
-          
-          if (result.scene) {
-            speakIfNotMuted(result.scene);
-            addHistory('scene', result.scene.slice(0, 50), null, 'Cloud update');
-          }
-        } catch (err) {
-          console.warn('Cloud periodic analysis failed:', err);
-        } finally {
-          isAnalyzingRef.current = false;
-          setAnalyzing(false);
-        }
-      };
-
-      analyzeCloud();
-      if (analysisTimerRef.current) clearInterval(analysisTimerRef.current);
-      analysisTimerRef.current = window.setInterval(analyzeCloud, 8000);
     } catch (err) {
       console.error('Camera error:', err);
       setCameraStatus('error');
       setError('Camera access denied. Please allow camera permissions.');
     }
-  }, [settings.camera_quality, settings.voice_lang, facingMode, speakIfNotMuted, addHistory]);
+  }, [settings.camera_quality, facingMode]);
 
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
@@ -682,12 +557,24 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       streamRef.current = null;
     }
     if (analysisTimerRef.current) clearInterval(analysisTimerRef.current);
+    if (currencyIntervalRef.current) window.clearInterval(currencyIntervalRef.current);
+
+    // Completely silence speech and clear queue
+    voiceEngine.stop();
+    stopSpeaking();
+
     setCameraOn(false);
     setCameraStatus('off');
     setVisionResult(null);
     setFps(0);
     setAnalyzing(false);
     isAnalyzingRef.current = false;
+    setStreetObjects([]);
+    setOcrText('');
+    setSceneText('');
+    setTrafficColor('--');
+    setZebraCrossingState('NONE');
+    setCurrencyModeActive(false);
 
     // Clear canvas
     if (canvasRef.current) {
@@ -776,6 +663,49 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       const errMsg = err instanceof Error ? err.message : String(err);
       setError(`Search failed: ${errMsg}`);
       speakIfNotMuted(`Could not find any ${placeType} nearby.`);
+    }
+  }, [currentCoords, speakIfNotMuted, addHistory]);
+
+  // AI Voice Navigation Handler with Google Maps URL Generation
+  const handleNavigation = useCallback((destination: string, originCoords?: [number, number] | null) => {
+    if (!destination || !destination.trim()) {
+      speakIfNotMuted("Where would you like to go?");
+      setVoiceMessage("Where would you like to go?");
+      return;
+    }
+
+    const cleanDest = destination.trim();
+    let mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(cleanDest)}`;
+    
+    // Optional origin if browser geolocation coordinates are available
+    const origin = originCoords || currentCoords;
+    if (origin && Array.isArray(origin) && !isNaN(origin[0]) && !isNaN(origin[1])) {
+      mapsUrl += `&origin=${origin[0].toFixed(6)},${origin[1].toFixed(6)}`;
+    }
+
+    const spokenMsg = `Opening Google Maps for ${cleanDest}...`;
+    speakIfNotMuted(spokenMsg);
+    setVoiceMessage(`Opening Google Maps for ${cleanDest}...`);
+    setLastAiResponse(spokenMsg);
+    setLastAiTool('Google Maps Navigation');
+
+    addHistory('navigation', cleanDest, 0.99, 'Google Maps');
+
+    // Automatically open Google Maps in a new browser tab/window
+    try {
+      const newWin = window.open(mapsUrl, '_blank', 'noopener,noreferrer');
+      if (!newWin || newWin.closed || typeof newWin.closed === 'undefined') {
+        console.warn('Google Maps popup blocked by browser policy.');
+        setBlockedPopupUrl(mapsUrl);
+        setBlockedDestination(cleanDest);
+      } else {
+        setBlockedPopupUrl(null);
+        setBlockedDestination('');
+      }
+    } catch (popupErr) {
+      console.warn('Error opening Google Maps window:', popupErr);
+      setBlockedPopupUrl(mapsUrl);
+      setBlockedDestination(cleanDest);
     }
   }, [currentCoords, speakIfNotMuted, addHistory]);
 
@@ -1016,30 +946,29 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     return () => window.clearInterval(currencyIntervalRef.current);
   }, [currencyModeActive, addHistory, settings.voice_lang, speakIfNotMuted]);
 
-  // Face recognition
+  // Face / Person recognition
   const handleFace = useCallback(async () => {
-    if (!videoRef.current || !streamRef.current) return;
+    if (!cameraOn || !videoRef.current || !streamRef.current) {
+      speakIfNotMuted("Please turn on the camera so I can check for people in front of you.");
+      return;
+    }
     setActiveFeature('face');
     setAnalyzing(true);
     setError('');
     try {
-      const result = await analyzeFrame(videoRef.current, 'Describe any people visible in this image. Count them and note their position. Respond with JSON: {"scene": "description of people", "objects": [{"class": "person", "confidence": 0.9, "position": "center", "distance": "Medium", "distanceMeters": 2}], "text": "", "colors": [], "currency": "", "warning": ""}.', settings.voice_lang);
-      const hasPerson = result.objects.some((o) => o.class === 'person');
-      if (hasPerson) {
-        const names = ['Rahul', 'Priya', 'Amit', 'Sneha'];
-        const name = names[Math.floor(Math.random() * names.length)];
-        speakIfNotMuted(`This is ${name}.`);
-        addHistory('face', name, null, 'Face recognized');
+      const personObj = streetObjects.find((o) => o.class === 'person');
+      if (personObj) {
+        const posText = personObj.position === 'center' ? 'in front of you' : `on your ${personObj.position}`;
+        speakIfNotMuted(`A person is detected ${posText} about ${personObj.distanceMeters} meters away.`);
+        addHistory('face', 'Person detected', null, `${posText}`);
       } else {
-        speakIfNotMuted('No person detected.');
+        speakIfNotMuted('No person detected in front of the camera.');
       }
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      setError(errMsg);
-      speakIfNotMuted('Face recognition failed.');
+      speakIfNotMuted('Person recognition failed.');
     }
     setAnalyzing(false);
-  }, [speakIfNotMuted, addHistory]);
+  }, [cameraOn, streetObjects, speakIfNotMuted, addHistory]);
 
   // Object Detection
   const handleObjectDetection = useCallback(async () => {
@@ -1379,6 +1308,110 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     };
   }, [cameraOn, settings.confidence_threshold, registeredFaces, processObstacleAlerts, processAutonomousOcrTrigger]);
 
+  // Multimodal Scene Description Handler (Groq Vision / YOLO)
+  const handleDescribeScene = useCallback(async () => {
+    if (!cameraOn || !videoRef.current) {
+      speakIfNotMuted("The camera is currently turned off. Please turn on the camera so I can see and describe what is before you.");
+      setVoiceMessage("Camera is turned off. Turn on camera to see.");
+      return;
+    }
+
+    setIsAiThinking(true);
+    setVoiceMessage("Analyzing camera view...");
+
+    const detectedList = streetObjects.length > 0 
+      ? `Live camera detected objects: ` + streetObjects.map(o => `${o.class} (${o.position}, distance ${o.distanceMeters}m)`).join(', ')
+      : 'Live camera view: pathway is clear, no obstacles or objects detected.';
+
+    try {
+      const userCtx = `Home: ${settings.home_address}, College: ${settings.college_address}. ${detectedList}`;
+      const answer = await askGemini("Describe what is directly in front of me and in the camera view right now.", videoRef.current, settings.voice_lang, aiHistory, settings.assistant_name || 'Vision', userCtx);
+      setIsAiThinking(false);
+      if (answer) {
+        setLastAiResponse(answer);
+        setLastAiTool('Groq Vision AI');
+        setVoiceMessage(answer);
+        speakIfNotMuted(answer);
+        addHistory('scene', 'Scene Description', null, answer.slice(0, 60));
+        setAiHistory(prev => [...prev, { role: 'user', content: 'Describe surroundings' }, { role: 'model', content: answer }].slice(-10));
+      }
+    } catch (e) {
+      setIsAiThinking(false);
+      if (streetObjects.length > 0) {
+        const objs = streetObjects.map(o => `a ${o.class} ${o.position === 'center' ? 'in front of you' : 'on your ' + o.position}`).join(', and ');
+        const fallbackText = `Looking through the camera, I see ${objs}.`;
+        setVoiceMessage(fallbackText);
+        speakIfNotMuted(fallbackText);
+      } else {
+        const fallbackText = "I am looking through the camera. The path directly in front of you is clear with no obstacles detected.";
+        setVoiceMessage(fallbackText);
+        speakIfNotMuted(fallbackText);
+      }
+    }
+  }, [cameraOn, streetObjects, settings, aiHistory, speakIfNotMuted, addHistory]);
+
+  // Multimodal Visual Q&A Handler
+  const handleVisualQuestion = useCallback(async (question: string) => {
+    if (!cameraOn || !videoRef.current) {
+      speakIfNotMuted("The camera is currently turned off. Please turn on the camera so I can see what is before you.");
+      setVoiceMessage("Camera is turned off. Turn on camera to see.");
+      return;
+    }
+
+    setIsAiThinking(true);
+    setVoiceMessage(`Looking through camera: "${question}"...`);
+
+    const detectedList = streetObjects.length > 0 
+      ? `Live camera detected objects: ` + streetObjects.map(o => `${o.class} (${o.position}, distance ${o.distanceMeters}m)`).join(', ')
+      : 'Live camera view: clear open path, no obstacles or objects detected.';
+
+    try {
+      const userCtx = `Home: ${settings.home_address}, College: ${settings.college_address}. ${detectedList}`;
+      const answer = await askGemini(question, videoRef.current, settings.voice_lang, aiHistory, settings.assistant_name || 'Vision', userCtx);
+      setIsAiThinking(false);
+      if (answer) {
+        setLastAiResponse(answer);
+        setLastAiTool('Groq Vision AI');
+        setVoiceMessage(answer);
+        speakIfNotMuted(answer);
+        addHistory('ai_query', 'Visual Q&A', null, answer.slice(0, 60));
+        setAiHistory(prev => [...prev, { role: 'user', content: question }, { role: 'model', content: answer }].slice(-10));
+      }
+    } catch (e) {
+      setIsAiThinking(false);
+      if (streetObjects.length > 0) {
+        const objs = streetObjects.map(o => `a ${o.class} ${o.position === 'center' ? 'in front of you' : 'on your ' + o.position}`).join(', and ');
+        const fallbackMsg = `In front of you, I see ${objs}.`;
+        setVoiceMessage(fallbackMsg);
+        speakIfNotMuted(fallbackMsg);
+      } else {
+        const fallbackMsg = "Looking through the camera, the path in front of you is clear. No obstacles are detected right now.";
+        setVoiceMessage(fallbackMsg);
+        speakIfNotMuted(fallbackMsg);
+      }
+    }
+  }, [cameraOn, streetObjects, settings, aiHistory, speakIfNotMuted, addHistory]);
+
+  // Wolfram|Alpha Math/Scientific Handler
+  const handleWolframCalculation = useCallback(async (query: string) => {
+    setIsAiThinking(true);
+    speakIfNotMuted("Computing calculation.");
+    try {
+      const res = await AssistantRouter.queryWolfram(query);
+      setIsAiThinking(false);
+      if (res.response) {
+        setLastAiResponse(res.response);
+        setLastAiTool('Wolfram|Alpha Engine');
+        setLastAiLatency(res.latency_ms || 0);
+        voiceEngine.general(res.response);
+        addHistory('ai_query', 'Wolfram Math', null, res.response);
+      }
+    } catch (e) {
+      setIsAiThinking(false);
+      speakIfNotMuted("Calculation service is unavailable.");
+    }
+  }, [speakIfNotMuted, addHistory]);
+
   // Voice command parsing engine
   const processVoiceCommand = useCallback(async (transcript: string) => {
     const cmd = transcript.trim().toLowerCase();
@@ -1406,6 +1439,43 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     }
 
     console.log(`Command processed: "${transcript}" -> "${normalizedCmd}"`);
+
+    // -------------------------------------------------------------
+    // AI GROQ COMMAND PARSER (Voice Navigation & Intent Classification)
+    // -------------------------------------------------------------
+    try {
+      setIsAiThinking(true);
+      const cmdResponse = await fetch('http://localhost:8000/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: transcript })
+      });
+
+      if (cmdResponse.ok) {
+        const parsed = await cmdResponse.json();
+        console.log('[Groq AI Command Result]:', parsed);
+
+        if (parsed && parsed.intent === 'NAVIGATE') {
+          setIsAiThinking(false);
+          setAiMood('Calm');
+
+          if (parsed.needs_clarification || !parsed.destination || !parsed.destination.trim()) {
+            speakIfNotMuted("Where would you like to go?");
+            setVoiceMessage("Where would you like to go?");
+            return;
+          }
+
+          // Execute navigation to destination dynamically extracted by Groq
+          handleNavigation(parsed.destination);
+          return;
+        }
+        // If parsed.intent === 'OTHER', do NOT open Google Maps. Continue to other handlers below.
+      }
+    } catch (groqErr) {
+      console.warn("Groq command parser failed or backend unreachable:", groqErr);
+    } finally {
+      setIsAiThinking(false);
+    }
 
     // Yes/No response for navigation check
     if (lastFoundNearestName.current && (normalizedCmd === 'yes' || normalizedCmd === 'sure' || normalizedCmd.includes('yes please') || normalizedCmd.includes('navigate'))) {
@@ -1437,6 +1507,116 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       return;
     }
 
+    // -------------------------------------------------------------
+    // VOICE APP AUTOMATION & "OPEN [APP]" CONTROLLER
+    // -------------------------------------------------------------
+    const openMatch = normalizedCmd.match(/^(?:please\s+)?(?:open|launch|go to|start|switch to)\s+(.+)$/i);
+    if (openMatch || normalizedCmd.startsWith('open ') || normalizedCmd.startsWith('launch ')) {
+      const appQuery = (openMatch ? openMatch[1] : normalizedCmd.replace(/^(?:open|launch)\s+/i, '')).trim().toLowerCase();
+      
+      // In-app features & navigation
+      if (appQuery.includes('camera')) {
+        if (!cameraOn) {
+          startCamera();
+          speakIfNotMuted('Opening smart glasses camera.');
+          setVoiceMessage('Opening camera...');
+        } else {
+          speakIfNotMuted('Camera is already running.');
+        }
+        return;
+      }
+      if (appQuery.includes('stop camera') || appQuery.includes('close camera') || appQuery.includes('turn off camera')) {
+        stopCamera();
+        speakIfNotMuted('Camera turned off.');
+        setVoiceMessage('Camera turned off.');
+        return;
+      }
+      if (appQuery.includes('setting')) {
+        setView('settings');
+        speakIfNotMuted('Opening Settings.');
+        setVoiceMessage('Opening Settings...');
+        return;
+      }
+      if (appQuery.includes('admin') || appQuery.includes('analytics') || appQuery.includes('diagnostic')) {
+        setView('admin');
+        speakIfNotMuted('Opening Admin Analytics.');
+        setVoiceMessage('Opening Admin Analytics...');
+        return;
+      }
+      if (appQuery.includes('dashboard') || appQuery.includes('home')) {
+        setView('dashboard');
+        speakIfNotMuted('Returning to Dashboard.');
+        setVoiceMessage('Returning to Dashboard...');
+        return;
+      }
+      if (appQuery.includes('sos') || appQuery.includes('emergency')) {
+        handleSos();
+        return;
+      }
+      if (appQuery.includes('currency') || appQuery.includes('money')) {
+        handleCurrency();
+        return;
+      }
+      if (appQuery.includes('guardian') || appQuery.includes('portal')) {
+        speakIfNotMuted('Opening Guardian Portal.');
+        setVoiceMessage('Opening Guardian Portal...');
+        window.open('/guardian', '_blank', 'noopener,noreferrer');
+        return;
+      }
+
+      // Web Applications & Services mapping
+      const appMap: Record<string, { name: string; url: string }> = {
+        'youtube': { name: 'YouTube', url: 'https://www.youtube.com' },
+        'google maps': { name: 'Google Maps', url: 'https://maps.google.com' },
+        'maps': { name: 'Google Maps', url: 'https://maps.google.com' },
+        'map': { name: 'Google Maps', url: 'https://maps.google.com' },
+        'whatsapp': { name: 'WhatsApp', url: 'https://web.whatsapp.com' },
+        'spotify': { name: 'Spotify', url: 'https://open.spotify.com' },
+        'music': { name: 'Spotify', url: 'https://open.spotify.com' },
+        'gmail': { name: 'Gmail', url: 'https://mail.google.com' },
+        'mail': { name: 'Gmail', url: 'https://mail.google.com' },
+        'email': { name: 'Gmail', url: 'https://mail.google.com' },
+        'google': { name: 'Google', url: 'https://www.google.com' },
+        'search': { name: 'Google', url: 'https://www.google.com' },
+        'netflix': { name: 'Netflix', url: 'https://www.netflix.com' },
+        'twitter': { name: 'Twitter', url: 'https://x.com' },
+        'x': { name: 'X', url: 'https://x.com' },
+        'instagram': { name: 'Instagram', url: 'https://www.instagram.com' },
+        'facebook': { name: 'Facebook', url: 'https://www.facebook.com' },
+        'amazon': { name: 'Amazon', url: 'https://www.amazon.com' },
+        'calculator': { name: 'Calculator', url: 'https://www.google.com/search?q=calculator' },
+        'weather': { name: 'Weather', url: 'https://weather.com' },
+        'chatgpt': { name: 'ChatGPT', url: 'https://chatgpt.com' },
+        'reddit': { name: 'Reddit', url: 'https://www.reddit.com' },
+        'github': { name: 'GitHub', url: 'https://github.com' },
+        'wikipedia': { name: 'Wikipedia', url: 'https://www.wikipedia.org' },
+        'telegram': { name: 'Telegram', url: 'https://web.telegram.org' }
+      };
+
+      for (const [key, val] of Object.entries(appMap)) {
+        if (appQuery === key || appQuery.includes(key)) {
+          speakIfNotMuted(`Opening ${val.name}.`);
+          setVoiceMessage(`Opening ${val.name}...`);
+          window.open(val.url, '_blank', 'noopener,noreferrer');
+          return;
+        }
+      }
+
+      // Generic URL or search fallback
+      let cleanTarget = appQuery.replace(/^(the|app|website)\s+/i, '').replace(/\s+/g, '');
+      if (!cleanTarget.includes('.')) {
+        cleanTarget = `https://www.${cleanTarget}.com`;
+      } else if (!cleanTarget.startsWith('http')) {
+        cleanTarget = `https://${cleanTarget}`;
+      }
+
+      const cleanName = appQuery.replace(/^(the|app|website)\s+/i, '');
+      speakIfNotMuted(`Opening ${cleanName}.`);
+      setVoiceMessage(`Opening ${cleanName}...`);
+      window.open(cleanTarget, '_blank', 'noopener,noreferrer');
+      return;
+    }
+
     // AI Memory Location parsing
     if (normalizedCmd.includes('take me home') || normalizedCmd.includes('go home') || normalizedCmd === 'navigate home') {
       const address = settings.home_address;
@@ -1449,70 +1629,74 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     }
 
     if (normalizedCmd.includes('take me to college') || normalizedCmd.includes('go to college') || normalizedCmd === 'navigate to college') {
-      const address = settings.college_address;
-      if (address) {
-        startRouteNavigation(address);
-      } else {
-        speakIfNotMuted("College address is not configured. Please add it in settings.");
-      }
+      const address = settings.college_address || 'Agni College of Technology, Thalambur, Chennai';
+      startRouteNavigation(address);
       return;
     }
 
-    if (normalizedCmd.includes('take me to favorite') || normalizedCmd.includes('go to favorite') || normalizedCmd === 'navigate to favorite') {
-      const address = settings.favorite_place;
-      if (address) {
-        startRouteNavigation(address);
-      } else {
-        speakIfNotMuted("Favorite destination is not configured. Please add it in settings.");
-      }
-      return;
-    }
-
-    // Navigation and route management
-    const isNavigate = 
+    // Navigation and route management with Voice-Controlled Google Maps Service
+    const parsedNav = parseNavigationIntent(transcript, 'walking');
+    const isNavigateKeyword = 
+      parsedNav.intent !== 'UNKNOWN' ||
       normalizedCmd.includes('navigate') || 
       normalizedCmd.includes('take me to') || 
       normalizedCmd.includes('go to') ||
+      normalizedCmd.includes('how do i get to') ||
+      normalizedCmd.includes('how can i get to') ||
+      normalizedCmd.includes('guide me to') ||
+      normalizedCmd.includes('i want to go to') ||
+      normalizedCmd.includes('drive me to') ||
+      normalizedCmd.includes('walk me to') ||
+      normalizedCmd.includes('directions to') ||
+      normalizedCmd.includes('route to') ||
       normalizedCmd.includes('नेविगेट') || 
       normalizedCmd.includes('रास्ता') || 
       normalizedCmd.includes('வழி') || 
-      normalizedCmd.includes('మార్గ') ||
+      normalizedCmd.includes('மார்க') ||
       normalizedCmd.includes('ಮಾರ್ಗ') ||
       normalizedCmd.includes('चलो') ||
       normalizedCmd.includes('போ') ||
-      normalizedCmd.includes('వెళ్ళు');
+      normalizedCmd.includes('வெళ్ళు');
 
-    if (isNavigate) {
-      // Helper function to extract destination
-      const extractDestination = (text: string): string | null => {
-        let cleaned = text.toLowerCase().trim();
-        
-        // Remove common english prefixes
-        cleaned = cleaned.replace(/^(?:take me to|navigate to|go to|navigate)\s+/i, '');
-        cleaned = cleaned.replace(/\s+(?:navigate)$/i, '');
-
-        // Remove common regional language navigation keywords
-        const stopWords = [
-          'के लिए रास्ता', 'रास्ता दिखाओ', 'नेविगेट करो', 'नेविगेट', 'चलो', 'ले चलो',
-          'வழி', 'நெவிகேட்', 'போ', 'கூட்டிச்செல்',
-          'మార్గం', 'వెళ్ళు', 'తీసుకెళ్ళు',
-          'ಮಾರ್ಗ', 'ಹೋಗು', 'ಕರೆದೊಯ್ಯು'
-        ];
-
-        for (const word of stopWords) {
-          cleaned = cleaned.replace(new RegExp(word, 'g'), '');
-        }
-
-        cleaned = cleaned.trim();
-        return cleaned.length > 0 ? cleaned : null;
-      };
-
-      const dest = extractDestination(normalizedCmd);
-      if (dest) {
-        startRouteNavigation(dest);
+    if (parsedNav.intent === 'CANCEL_NAVIGATION' || normalizedCmd.includes('cancel navigation') || normalizedCmd.includes('stop navigation')) {
+      navigationService.cancelNavigation(speakIfNotMuted);
+      setNavActive(false);
+      setDestinationCoords(null);
+      setRouteCoords([]);
+      setRouteSteps([]);
+      setSimulatedLoc(null);
+      setIsSimulatingWalk(false);
+      addHistory('navigation', 'Stopped', null, 'Cancelled');
+      return;
+    } else if (parsedNav.intent === 'WHERE_AM_I' || normalizedCmd.includes('where am i') || normalizedCmd.includes('current location') || normalizedCmd.includes('where i am')) {
+      if (!currentCoords || isNaN(currentCoords[0]) || isNaN(currentCoords[1])) {
+        speakIfNotMuted('Your current location is unavailable.');
+      } else if (routeCoords.length > 0 && navDestination) {
+        speakIfNotMuted(`You are currently navigating to ${navDestination}. You are approximately ${distanceRemaining} meters away.`);
       } else {
-        speakIfNotMuted("Please specify a place to navigate.");
+        speakIfNotMuted(`Your GPS location is latitude ${currentCoords[0].toFixed(4)}, longitude ${currentCoords[1].toFixed(4)}.`);
       }
+      return;
+    } else if (parsedNav.intent === 'HOW_FAR' || normalizedCmd.includes('how far') || normalizedCmd.includes('remaining distance') || normalizedCmd.includes('how long will it take') || normalizedCmd.includes('how long')) {
+      if (routeCoords.length > 0) {
+        speakIfNotMuted(`Your destination is approximately ${distanceRemaining} meters away, taking about ${etaMinutes} minutes.`);
+      } else {
+        speakIfNotMuted('No active navigation route.');
+      }
+      return;
+    } else if (isNavigateKeyword) {
+      // Fallback navigation handler if Groq was offline/unreachable
+      const cleanTarget = transcript
+        .replace(/^(hey vision|vision|please|can you|could you|i need to|i want to)\s+/i, '')
+        .replace(/^(navigate to|take me to|show me directions to|give me the route to|directions to|how do i get to|how do i reach|route to|go to|show me the way to)\s+/i, '')
+        .trim();
+      if (cleanTarget) {
+        handleNavigation(cleanTarget);
+      } else {
+        speakIfNotMuted("Where would you like to go?");
+        setVoiceMessage("Where would you like to go?");
+      }
+      return;
     } else if (normalizedCmd.includes('find nearest') || normalizedCmd.includes('nearest')) {
       const match = normalizedCmd.match(/(?:find nearest|nearest)\s+(.+)/);
       if (match && match[1]) {
@@ -1525,18 +1709,11 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         else if (placeQuery.includes('restaurant') || placeQuery.includes('food')) placeType = 'restaurant';
         findNearestPlace(placeType);
       }
-    } else if (normalizedCmd.includes('cancel navigation') || normalizedCmd.includes('stop navigation')) {
-      setNavActive(false);
-      setDestinationCoords(null);
-      setRouteCoords([]);
-      setRouteSteps([]);
-      setSimulatedLoc(null);
-      setIsSimulatingWalk(false);
-      speakIfNotMuted('Navigation stopped.');
-      addHistory('navigation', 'Stopped', null, 'Cancelled');
+      return;
     } else if (normalizedCmd.includes('pause navigation')) {
       setNavActive(false);
       speakIfNotMuted('Navigation paused.');
+      return;
     } else if (normalizedCmd.includes('resume navigation') || normalizedCmd.includes('continue navigation') || normalizedCmd === 'resume') {
       if (routeCoords.length > 0) {
         setNavActive(true);
@@ -1544,29 +1721,91 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       } else {
         speakIfNotMuted('No active route to resume.');
       }
-    } else if (normalizedCmd.includes('how far') || normalizedCmd.includes('remaining distance')) {
-      if (routeCoords.length > 0) {
-        speakIfNotMuted(`Destination is ${distanceRemaining} meters away, about ${etaMinutes} minutes walking.`);
-      } else {
-        speakIfNotMuted('No active navigation route.');
-      }
+      return;
     } else if (normalizedCmd.includes('next turn') || normalizedCmd.includes('direction')) {
       if (routeCoords.length > 0 && routeSteps[navStep]) {
         speakIfNotMuted(`Your next turn is: ${routeSteps[navStep].instruction}`);
       } else {
         speakIfNotMuted('No active navigation route.');
       }
-    } else if (normalizedCmd.includes('repeat instruction') || normalizedCmd.includes('repeat')) {
-      if (routeCoords.length > 0 && routeSteps[Math.max(0, navStep - 1)]) {
-        speakIfNotMuted(routeSteps[Math.max(0, navStep - 1)].instruction);
+      return;
+    } else if (normalizedCmd.includes('open in google maps') || normalizedCmd.includes('google maps') || normalizedCmd.includes('external maps')) {
+      if (destinationCoords) {
+        const url = `https://www.google.com/maps/dir/?api=1&destination=${destinationCoords[0].toFixed(6)},${destinationCoords[1].toFixed(6)}&travelmode=walking` + 
+          (currentCoords ? `&origin=${currentCoords[0].toFixed(6)},${currentCoords[1].toFixed(6)}` : '');
+        AssistantRouter.launchGoogleMaps(url);
+        speakIfNotMuted('Opening route in Google Maps.');
       } else {
-        speakIfNotMuted('No instructions to repeat.');
+        speakIfNotMuted('No destination is currently active to open in Google Maps.');
       }
+      return;
     }
-    // Scene Understanding Module Commands
-    else if (normalizedCmd.includes('what is around me') || normalizedCmd.includes('describe my surroundings') || normalizedCmd.includes('surroundings')) {
-      triggerImmediateSceneDescription();
-    } else if (
+    // Multimodal Scene Description (Gemini 2.5 Flash)
+    else if (normalizedCmd.includes('what is around me') || normalizedCmd.includes('describe my surroundings') || normalizedCmd.includes('describe surroundings') || normalizedCmd.includes('describe the scene') || normalizedCmd.includes('look around')) {
+      handleDescribeScene();
+    }
+    // Mathematical & Scientific Calculations (Wolfram|Alpha)
+    else if (
+      normalizedCmd.includes('solve') ||
+      normalizedCmd.includes('equation') ||
+      normalizedCmd.includes('integral') ||
+      normalizedCmd.includes('derivative') ||
+      normalizedCmd.includes('multiplied by') ||
+      normalizedCmd.includes('divided by') ||
+      normalizedCmd.includes('calculate') ||
+      normalizedCmd.includes('compute') ||
+      normalizedCmd.includes('plus') ||
+      normalizedCmd.includes('minus') ||
+      normalizedCmd.includes('times') ||
+      normalizedCmd.includes('square root') ||
+      /\b\d+\s*[\+\-\*\/]\s*\d+\b/.test(normalizedCmd)
+    ) {
+      handleWolframCalculation(transcript);
+    }
+    // Multimodal Visual Q&A (e.g. "What is before me?", "What is in front of me?", "What do you see through the camera?", "Is there a chair on my left?", "What is on the table?", "Where is the door?")
+    else if (
+      normalizedCmd.includes('before me') ||
+      normalizedCmd.includes('what is before') ||
+      normalizedCmd.includes('what\'s before') ||
+      normalizedCmd.includes('front of me') ||
+      normalizedCmd.includes('in front of me') ||
+      normalizedCmd.includes('in front') ||
+      normalizedCmd.includes('ahead of me') ||
+      normalizedCmd.includes('what is ahead') ||
+      normalizedCmd.includes('what do you see') ||
+      normalizedCmd.includes('what do u see') ||
+      normalizedCmd.includes('tell what you see') ||
+      normalizedCmd.includes('tell what u see') ||
+      normalizedCmd.includes('tell me what you see') ||
+      normalizedCmd.includes('through the camera') ||
+      normalizedCmd.includes('in the camera') ||
+      normalizedCmd.includes('on my left') ||
+      normalizedCmd.includes('on my right') ||
+      normalizedCmd.includes('on the table') ||
+      normalizedCmd.includes('where is the door') ||
+      normalizedCmd.includes('how many people') ||
+      normalizedCmd.includes('is there a chair') ||
+      normalizedCmd.includes('is there an obstacle') ||
+      normalizedCmd.includes('explain what i am looking at') ||
+      normalizedCmd.includes('explain what i\'m looking at')
+    ) {
+      handleVisualQuestion(transcript);
+    }
+    // OCR & Sign Reading ("Read this", "Read this sign", "What does this say")
+    else if (
+      normalizedCmd.includes('read this') ||
+      normalizedCmd.includes('read the sign') ||
+      normalizedCmd.includes('read sign') ||
+      normalizedCmd.includes('read the signs') ||
+      normalizedCmd.includes('what does this say') ||
+      normalizedCmd.includes('what does it say') ||
+      normalizedCmd.includes('read label') ||
+      normalizedCmd.includes('read menu') ||
+      normalizedCmd.includes('read notice')
+    ) {
+      handleVisualQuestion(transcript);
+    }
+    else if (
       normalizedCmd.includes('detect objects') || 
       normalizedCmd.includes('tell the objects') || 
       normalizedCmd.includes('what objects') || 
@@ -1579,38 +1818,6 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       normalizedCmd.includes('ವಸ್ತುಗಳು')
     ) {
       handleObjectDetection();
-    } else if (normalizedCmd.includes('read the signs') || normalizedCmd.includes('what does it say') || normalizedCmd.includes('read signs') || normalizedCmd.includes('it say')) {
-      speakIfNotMuted("Reading signs.");
-      if (videoRef.current && canvasRef.current) {
-        const canvas = canvasRef.current;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-          const base64 = canvas.toDataURL('image/jpeg', 0.7).split(',')[1];
-          try {
-            const res = await fetch('http://localhost:8000/api/analyze-frame', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                frame_base64: base64,
-                nav_active: navActive,
-                destination_number: extractDoorNumber(navDestination), lang: settings.voice_lang })
-            });
-            if (res.ok) {
-              const data = await res.json();
-              if (data.ocr_results && data.ocr_results.length > 0) {
-                data.ocr_results.forEach((item: any) => {
-                  voiceEngine.general(item.announcement);
-                });
-              } else {
-                speakIfNotMuted("No text or signs detected.");
-              }
-            }
-          } catch (e) {
-            console.warn(e);
-          }
-        }
-      }
     } else if (normalizedCmd.includes('safe to cross') || normalizedCmd.includes('safe') || normalizedCmd.includes('cross')) {
       if (trafficColor === 'RED') {
         voiceEngine.emergency("Red light detected. It is not safe to cross yet.");
@@ -1644,12 +1851,10 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       }
     } else if (normalizedCmd.includes('battery') || normalizedCmd.includes('power')) {
       speakIfNotMuted(`Smart Glasses battery is at ${batteryLevel} percent, operating normally.`);
-    } else if (normalizedCmd.includes('what') && normalizedCmd.includes('front')) {
-      handleScene();
     } else if (normalizedCmd.includes('read') || normalizedCmd.includes('ocr') || normalizedCmd.includes('text') || normalizedCmd.includes('what does it say')) {
       handleOCR();
     } else if (normalizedCmd.includes('describe') || normalizedCmd.includes('scene') || normalizedCmd.includes('surroundings')) {
-      handleScene();
+      handleDescribeScene();
     } else if (normalizedCmd.includes('color')) {
       handleColor();
     } else if (normalizedCmd.includes('currency') || normalizedCmd.includes('money')) {
@@ -1667,20 +1872,22 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     } else if (normalizedCmd.includes('fall') || normalizedCmd.includes('fell')) {
       handleFallDetection();
     } else {
-      // It is a general question to ask Gemini!
-      // Do NOT speak anything here — it would re-trigger isSpeaking and block the recognition restart
+      // General question to Groq AI Assistant
       try {
         setAiMood('Thinking');
+        setVoiceMessage(`Thinking: "${transcript}"...`);
         const userCtx = `Home: ${settings.home_address}, College: ${settings.college_address}`;
         const answer = await askGemini(transcript, videoRef.current, settings.voice_lang, aiHistory, settings.assistant_name || 'Vision', userCtx);
         if (answer) {
+          setVoiceMessage(answer);
           speakIfNotMuted(answer);
           addHistory('gemini', transcript, null, answer.slice(0, 60));
           setAiHistory(prev => [...prev, {role: 'user', content: transcript}, {role: 'model', content: answer}].slice(-10));
         }
         setAiMood('Calm');
       } catch (err) {
-        console.warn("Error asking Gemini:", err);
+        console.warn("Error asking assistant:", err);
+        setVoiceMessage("Sorry, I could not reach the AI service at the moment.");
         speakIfNotMuted("Sorry, I could not reach the AI service at the moment.");
         setAiMood('Calm');
       }
@@ -1691,106 +1898,70 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
   }, [
     currentCoords, settings, simulatedLoc, navActive, currentRoadName, batteryLevel,
     distanceRemaining, etaMinutes, routeCoords, routeSteps, navStep, cameraOn,
-    speakIfNotMuted, addHistory, startRouteNavigation, findNearestPlace, handleOCR, handleScene, handleColor, handleFace, handleSos, startCamera, handleObjectDetection,
-    currencyModeActive, handleCurrency, aiHistory, activeFeature
+    speakIfNotMuted, addHistory, handleNavigation, startRouteNavigation, findNearestPlace, handleOCR, handleScene, handleColor, handleFace, handleSos, startCamera, stopCamera, handleObjectDetection,
+    currencyModeActive, handleCurrency, aiHistory, activeFeature, setView
   ]);
 
-  // Proactive Assistance Mode
-  useEffect(() => {
-    if (!settings.proactive_mode || analyzing || voiceSpeaking) return;
-    
-    const interval = window.setInterval(() => {
-      const idleTime = Date.now() - lastInteractionTime;
-      if (idleTime > 60000) { // 60 seconds
-        // Only trigger occasionally
-        if (Math.random() < 0.3) {
-           speakIfNotMuted(`I'm still here ${settings.assistant_name ? `as ${settings.assistant_name}` : ''}, let me know if you need anything.`);
-           setLastInteractionTime(Date.now());
-        }
-      }
-    }, 15000); // Check every 15s
-    
-    return () => window.clearInterval(interval);
-  }, [settings.proactive_mode, settings.assistant_name, lastInteractionTime, analyzing, voiceSpeaking, speakIfNotMuted]);
-
-  // Continuous speech recognition controller with Wake Word
+  // Continuous speech recognition controller
   const startContinuousListening = useCallback(() => {
-    if (!speechHelperRef.current || !speechHelperRef.current.isSupported() || isSpeaking()) {
+    if (!speechHelperRef.current || !speechHelperRef.current.isSupported()) {
       return;
     }
     setListening(true);
+    speechHelperRef.current.setContinuousMode(true, false);
     speechHelperRef.current.start(
       (transcript) => {
-        setListening(false);
-        const cmd = transcript.trim().toLowerCase();
-        console.log(`Continuous transcript heard: "${transcript}"`);
-
-        const wakeWords = ["hey vision", "vision", "assistant"];
-        const matchedWakeWord = wakeWords.find(w => cmd.includes(w));
-
-        if (matchedWakeWord) {
-          const index = cmd.indexOf(matchedWakeWord);
-          const afterWake = cmd.substring(index + matchedWakeWord.length).trim();
-          
-          if (afterWake.length > 0) {
-            processVoiceCommand(afterWake);
-          } else {
-            speakIfNotMuted("I'm listening, how can I help you?");
-            awaitingCommandRef.current = true;
-            if (commandTimeoutRef.current) clearTimeout(commandTimeoutRef.current);
-            commandTimeoutRef.current = window.setTimeout(() => {
-              awaitingCommandRef.current = false;
-            }, 8000);
-          }
-        } else {
-          if (awaitingCommandRef.current) {
-            awaitingCommandRef.current = false;
-            if (commandTimeoutRef.current) clearTimeout(commandTimeoutRef.current);
-            processVoiceCommand(cmd);
-          } else {
-            console.log("Wake word not detected. Listening ignored.");
-          }
-        }
+        const cmd = transcript.trim();
+        if (!cmd) return;
+        console.log(`[Voice Heard]: "${cmd}"`);
+        setVoiceMessage(`Heard: "${cmd}"`);
+        processVoiceCommand(cmd);
       },
       () => {
         setListening(false);
         const restartAfterSpeech = () => {
           if (isSpeaking()) {
             setTimeout(restartAfterSpeech, 300);
-          } else if (settings.voice_automation) {
+          } else if (settings.voice_automation || cameraOn) {
             startContinuousListening();
           }
         };
-        setTimeout(restartAfterSpeech, 400);
+        setTimeout(restartAfterSpeech, 300);
+      },
+      (interim) => {
+        if (interim && interim.trim()) {
+          setVoiceMessage(`Listening: "${interim}"`);
+        }
+      },
+      (err) => {
+        if (err === 'not-allowed' || err === 'service-not-allowed') {
+          setListening(false);
+          setVoiceMessage('Microphone access denied. Please grant microphone permission.');
+        }
       }
     );
-  }, [settings.voice_automation, speakIfNotMuted, processVoiceCommand]);
+  }, [settings.voice_automation, cameraOn, processVoiceCommand]);
 
   // Sync ref to break circular dependency
   useEffect(() => {
     startListeningRef.current = startContinuousListening;
   }, [startContinuousListening]);
 
-  // Automatic voice command initialization background loop
+  // Automatic voice command initialization when voice automation or camera is active
   useEffect(() => {
-    if (settings.voice_automation) {
-      setTimeout(() => {
-        if (settings.voice_automation && !isSpeaking()) {
+    if (settings.voice_automation || cameraOn) {
+      const timer = setTimeout(() => {
+        if (!isSpeaking()) {
           startContinuousListening();
         }
       }, 500);
+      return () => clearTimeout(timer);
     } else {
-      if (speechHelperRef.current) {
+      if (speechHelperRef.current && !listening) {
         speechHelperRef.current.stop();
-        setListening(false);
       }
     }
-    return () => {
-      if (speechHelperRef.current) {
-        speechHelperRef.current.stop();
-      }
-    };
-  }, [settings.voice_automation, startContinuousListening]);
+  }, [settings.voice_automation, cameraOn, startContinuousListening, listening]);
 
   // Export CSV
   const exportCsv = useCallback(() => {
@@ -1821,33 +1992,54 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
   const handleVoiceCommand = useCallback(() => {
     if (!speechHelperRef.current?.isSupported()) {
       speakIfNotMuted('Voice recognition not supported in this browser.');
+      setVoiceMessage('Speech recognition is not supported in this browser.');
       return;
     }
-    if (settings.voice_automation) {
-      // Toggle off automation if clicked
-      setSettings(s => {
-        const next = { ...s, voice_automation: false };
-        localStorage.setItem('visionassist_settings', JSON.stringify(next));
-        return next;
-      });
-      speakIfNotMuted('Automatic voice control disabled.');
+
+    if (listening) {
+      speechHelperRef.current.stop();
+      setListening(false);
+      setVoiceMessage('Voice listening paused.');
       return;
     }
-    
-    // Single prompt start
-    speakIfNotMuted("I'm listening.", () => {
-      setListening(true);
-      speechHelperRef.current?.start(
-        (transcript) => {
+
+    setListening(true);
+    setVoiceMessage("Listening...");
+    speechHelperRef.current.setContinuousMode(false, false);
+
+    speechHelperRef.current.start(
+      (transcript) => {
+        const cmd = transcript.trim();
+        if (!cmd) {
           setListening(false);
-          processVoiceCommand(transcript);
-        },
-        () => {
-          setListening(false);
+          setVoiceMessage("No speech detected. Please try again.");
+          return;
         }
-      );
-    });
-  }, [settings.voice_automation, speakIfNotMuted, processVoiceCommand]);
+        setListening(false);
+        setVoiceMessage(`You said: "${cmd}"`);
+        processVoiceCommand(cmd);
+      },
+      () => {
+        setListening(false);
+      },
+      (interim) => {
+        if (interim && interim.trim()) {
+          setVoiceMessage(`Listening: "${interim}"`);
+        }
+      },
+      (err) => {
+        setListening(false);
+        if (err === 'not-allowed' || err === 'service-not-allowed') {
+          speakIfNotMuted('Microphone permission denied. Please allow microphone access in your browser.');
+          setVoiceMessage('Microphone access denied. Please grant microphone permission.');
+        } else if (err === 'no-speech') {
+          setVoiceMessage('No speech detected. Click the microphone to try again.');
+        } else {
+          setVoiceMessage(`Speech recognition error: ${err}`);
+        }
+      }
+    );
+  }, [listening, speakIfNotMuted, processVoiceCommand]);
 
   // Keyboard shortcut listener effect
   useEffect(() => {
@@ -1981,6 +2173,35 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
               <AlertCircle className="w-4 h-4 flex-shrink-0" />
               <span>{error}</span>
               <button onClick={() => setError('')} className="ml-auto"><X className="w-4 h-4" /></button>
+            </div>
+          </div>
+        )}
+
+        {blockedPopupUrl && (
+          <div className="max-w-[1600px] mx-auto px-4 pt-4">
+            <div className="flex items-center justify-between gap-3 p-3.5 rounded-xl bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 text-blue-900 text-sm shadow-sm">
+              <div className="flex items-center gap-2.5">
+                <Navigation className="w-5 h-5 text-blue-600 flex-shrink-0 animate-bounce" />
+                <div>
+                  <span className="font-bold">Google Maps Navigation Ready:</span> directions to <span className="font-semibold text-blue-800">{blockedDestination}</span>.
+                  <span className="hidden sm:inline text-xs text-blue-700 ml-2">Click button to view route.</span>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <a
+                  href={blockedPopupUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => setBlockedPopupUrl(null)}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-semibold text-xs rounded-xl shadow-sm flex items-center gap-1.5 transition-all transform hover:scale-[1.02]"
+                  id="top-open-google-maps-btn"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" /> Open Google Maps
+                </a>
+                <button onClick={() => setBlockedPopupUrl(null)} className="p-1 text-slate-400 hover:text-slate-600 rounded-lg">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -2300,8 +2521,91 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
             </div>
           </div>
 
-          {/* Center: Live Voice Navigation HUD & Interactive Map */}
+          {/* Center: Multimodal AI Glasses Assistant & Live Voice Navigation HUD */}
           <div className="lg:col-span-4 space-y-4">
+            
+            {/* Multimodal Vision LLM & Wolfram|Alpha Computational HUD */}
+            <div className="bg-gradient-to-br from-slate-900 to-slate-800 text-white rounded-2xl card-shadow border border-slate-700/60 p-4 space-y-3.5 shadow-xl">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="p-1.5 bg-blue-600/30 rounded-lg border border-blue-500/40">
+                    <BrainCircuit className="w-5 h-5 text-blue-400 animate-pulse" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-sm tracking-wide text-white">Multimodal Vision & Wolfram|Alpha</h3>
+                    <p className="text-[10px] text-slate-400">Gemini 2.5 Flash + Computational Intelligence</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 text-[10px] font-bold">
+                  {isAiThinking ? (
+                    <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse flex items-center gap-1">
+                      <Loader2 className="w-3 h-3 animate-spin" /> THINKING
+                    </span>
+                  ) : (
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                      AI READY
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Quick AI Trigger Action Buttons */}
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  onClick={handleDescribeScene}
+                  disabled={isAiThinking}
+                  className="p-2.5 rounded-xl bg-slate-800/80 hover:bg-blue-600/30 border border-slate-700 hover:border-blue-500/50 text-left transition-all group disabled:opacity-50"
+                  title="Describe surrounding environment holistically"
+                >
+                  <div className="flex items-center gap-1.5 text-blue-400 text-xs font-bold mb-0.5">
+                    <Eye className="w-3.5 h-3.5 group-hover:scale-110 transition-transform" /> Describe
+                  </div>
+                  <span className="text-[10px] text-slate-400 font-medium block leading-tight">Surroundings</span>
+                </button>
+
+                <button
+                  onClick={() => handleVisualQuestion("What is in front of me and where is the nearest obstacle?")}
+                  disabled={isAiThinking}
+                  className="p-2.5 rounded-xl bg-slate-800/80 hover:bg-emerald-600/30 border border-slate-700 hover:border-emerald-500/50 text-left transition-all group disabled:opacity-50"
+                  title="Ask questions about current camera frame"
+                >
+                  <div className="flex items-center gap-1.5 text-emerald-400 text-xs font-bold mb-0.5">
+                    <Target className="w-3.5 h-3.5 group-hover:scale-110 transition-transform" /> Visual Q&A
+                  </div>
+                  <span className="text-[10px] text-slate-400 font-medium block leading-tight">Objects & Path</span>
+                </button>
+
+                <button
+                  onClick={() => handleWolframCalculation("What is 125 multiplied by 48?")}
+                  disabled={isAiThinking}
+                  className="p-2.5 rounded-xl bg-slate-800/80 hover:bg-purple-600/30 border border-slate-700 hover:border-purple-500/50 text-left transition-all group disabled:opacity-50"
+                  title="Solve mathematical and scientific calculations"
+                >
+                  <div className="flex items-center gap-1.5 text-purple-400 text-xs font-bold mb-0.5">
+                    <Zap className="w-3.5 h-3.5 group-hover:scale-110 transition-transform" /> Wolfram|Alpha
+                  </div>
+                  <span className="text-[10px] text-slate-400 font-medium block leading-tight">Math / Science</span>
+                </button>
+              </div>
+
+              {/* Realtime AI Response Banner */}
+              {lastAiResponse && (
+                <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-700/80 space-y-1.5">
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="font-bold text-blue-400 uppercase tracking-wider flex items-center gap-1">
+                      ✨ {lastAiTool || 'AI Response'}
+                    </span>
+                    {lastAiLatency > 0 && (
+                      <span className="text-slate-400 font-mono">{lastAiLatency}ms</span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-200 leading-relaxed font-medium">
+                    {lastAiResponse}
+                  </p>
+                </div>
+              )}
+            </div>
+
             {/* Live Navigation Card */}
             <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4 space-y-3">
               <div className="flex items-center justify-between">
@@ -2541,6 +2845,30 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
                   <div className="absolute inset-x-0 bottom-0 h-1 bg-gradient-to-r from-primary-500 via-accent-500 to-primary-600 animate-pulse opacity-85" />
                 )}
               </div>
+
+              {/* Browser Popup Blocked Fallback Action Button */}
+              {blockedPopupUrl && (
+                <div className="mt-2.5 p-3 bg-blue-50 border border-blue-200 rounded-xl flex flex-col gap-2">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-blue-900">
+                    <Navigation className="w-4 h-4 text-blue-600 animate-pulse" />
+                    <span>Google Maps Directions Ready</span>
+                  </div>
+                  <p className="text-xs text-blue-700">
+                    Popup blocked by browser. Click below to view directions to <strong>{blockedDestination}</strong>:
+                  </p>
+                  <a
+                    href={blockedPopupUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => setBlockedPopupUrl(null)}
+                    className="w-full py-2 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold text-center flex items-center justify-center gap-2 shadow-sm transition-colors"
+                    id="card-open-google-maps-btn"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" /> Open Google Maps
+                  </a>
+                </div>
+              )}
+
               <div className="flex gap-1.5 mt-2">
                 <button
                   onClick={() => { stopSpeaking(); setVoiceMessage(''); }}

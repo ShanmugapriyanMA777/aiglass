@@ -159,324 +159,14 @@ export async function analyzeFrame(
     console.warn('AI analysis API failed, trying client-side local detector:', err);
 
     // If local TensorFlow COCO-SSD is loaded in window, run real deep learning detection!
-    if (typeof window !== 'undefined' && (window as any).cocoSsd) {
-      try {
-        const promptStr = (customPrompt || '').toLowerCase();
-
-        // If it's a specific non-object feature and we are offline/fallback, let's provide simulation responses
-        // so that they "recognize everything" instead of returning empty fields!
-        if (promptStr.includes('read all text')) {
-          const textOptions = [
-            "It looks like a label that says 'VisionAssist: Empowering independence with computer vision.'",
-            "This appears to be a warning label. It says 'Caution: Keep away from children.'",
-            "You are looking at a book. It's open to 'Section 1.1: Introduction to Artificial Intelligence.'",
-            "This is a milk carton. It's 'Organic Milk', and the ingredients are Pasteurized Milk and Vitamin D3.",
-            "There's a sign ahead that says 'Metro Station Exit'. Main Street is about 100 meters away."
-          ];
-          let randomText = textOptions[Math.floor(Math.random() * textOptions.length)];
-          if (targetLang && targetLang !== 'en-US') {
-            randomText = translateText(randomText, targetLang);
-          }
-          return {
-            objects: [],
-            scene: '',
-            text: randomText,
-            colors: [],
-            currency: '',
-            warning: ''
-          };
-        }
-
-        if (promptStr.includes('dominant colors')) {
-          const colorGroups = [
-            [{ name: 'Navy Blue', hex: '#1e3a8a' }, { name: 'White', hex: '#ffffff' }],
-            [{ name: 'Forest Green', hex: '#064e3b' }, { name: 'Soft Gray', hex: '#f1f5f9' }],
-            [{ name: 'Crimson Red', hex: '#991b1b' }, { name: 'Gold', hex: '#d97706' }],
-          ];
-          const randomColors = colorGroups[Math.floor(Math.random() * colorGroups.length)];
-          return {
-            objects: [],
-            scene: '',
-            text: '',
-            colors: randomColors,
-            currency: '',
-            warning: ''
-          };
-        }
-
-        if (promptStr.includes('currency')) {
-          const notes = ["100 Rupees note", "500 Rupees note", "50 Rupees note"];
-          let randomNote = notes[Math.floor(Math.random() * notes.length)];
-          if (targetLang && targetLang !== 'en-US') {
-            randomNote = translateText(randomNote, targetLang);
-          }
-          return {
-            objects: [],
-            scene: '',
-            text: '',
-            colors: [],
-            currency: randomNote,
-            warning: ''
-          };
-        }
-
-        if (!video) throw new Error('Video element not active for local object detection');
-        const model = await getLocalModel();
-        const predictions = await model.detect(video);
-        
-        const videoWidth = video.videoWidth || 640;
-        const videoHeight = video.videoHeight || 480;
-
-        const objects: DetectedObject[] = predictions.map((pred: any) => {
-          const [x, , w, h] = pred.bbox;
-          const centerX = x + w / 2;
-          
-          // Determine position
-          let position: 'left' | 'center' | 'right' = 'center';
-          if (centerX < videoWidth * 0.35) {
-            position = 'left';
-          } else if (centerX > videoWidth * 0.65) {
-            position = 'right';
-          }
-
-          // Estimate distance
-          const relativeHeight = h / videoHeight;
-          const distanceMeters = Math.min(10, Math.max(0.3, Math.round((0.5 / relativeHeight) * 10) / 10));
-          
-          let distance: 'Very close' | 'Close' | 'Medium' | 'Far' = 'Far';
-          if (distanceMeters <= 1.2) distance = 'Very close';
-          else if (distanceMeters <= 2.2) distance = 'Close';
-          else if (distanceMeters <= 4.2) distance = 'Medium';
-
-          // Translate class name if targetLang is provided
-          let className = pred.class;
-          if (targetLang && targetLang !== 'en-US') {
-            className = translateText(pred.class, targetLang);
-          }
-
-          return {
-            class: className,
-            confidence: Math.round(pred.score * 100) / 100,
-            position,
-            distance,
-            distanceMeters,
-            bbox: pred.bbox
-          };
-        });
-
-        // Build heuristic scene description
-        let scene = '';
-        const shortLang = targetLang ? targetLang.split('-')[0].toLowerCase() : 'en';
-
-        if (objects.length > 0) {
-          if (shortLang === 'ta') {
-            const posMap: Record<string, string> = {
-              center: 'உங்கள் நேர் முன்',
-              left: 'உங்கள் இடதுபுறம்',
-              right: 'உங்கள் வலதுபுறம்'
-            };
-            const descriptions = objects.map(o => `${posMap[o.position] || o.position} ஒரு ${o.class}`);
-            scene = `${descriptions.join(', மற்றும் ')} உள்ளது.`;
-          } else if (shortLang === 'hi') {
-            const posMap: Record<string, string> = {
-              center: 'आपके सामने',
-              left: 'आपके बाएं',
-              right: 'आपके दाएं'
-            };
-            const descriptions = objects.map(o => `${posMap[o.position] || o.position} एक ${o.class}`);
-            scene = `${descriptions.join(', और ')} है।`;
-          } else {
-            const descriptions = objects.map(o => `a ${o.class} on your ${o.position === 'center' ? 'front' : o.position}`);
-            scene = `I can see ${descriptions.join(', and ')}.`;
-          }
-        } else {
-          if (shortLang === 'ta') {
-            scene = 'உங்கள் முன் செல்லும் பாதை தெளிவாக உள்ளது.';
-          } else if (shortLang === 'hi') {
-            scene = 'आपके सामने का रास्ता साफ है।';
-          } else {
-            scene = 'The path in front of you is clear.';
-          }
-        }
-
-        const nearObstacle = objects.find(o => o.distanceMeters <= 1.2);
-        let warning = '';
-        if (nearObstacle) {
-          if (shortLang === 'ta') {
-            const posMap: Record<string, string> = {
-              center: 'உங்கள் முன்',
-              left: 'உங்கள் இடதுபுறம்',
-              right: 'உங்கள் வலதுபுறம்'
-            };
-            const posText = posMap[nearObstacle.position] || nearObstacle.position;
-            warning = `எச்சரிக்கை: ${posText} ஒரு ${nearObstacle.class} மிக அருகில் உள்ளது.`;
-          } else {
-            warning = `Warning: ${nearObstacle.class} is very close at ${nearObstacle.distanceMeters} meters`;
-          }
-        }
-
-        // Translate scene & warning if needed
-        let finalScene = scene;
-        let finalWarning = warning;
-        if (targetLang && targetLang !== 'en-US' && shortLang !== 'ta' && shortLang !== 'hi') {
-          finalScene = translateText(scene, targetLang);
-          if (warning) {
-            finalWarning = translateText(warning, targetLang);
-          }
-        }
-
-        return {
-          objects,
-          scene: finalScene,
-          text: '',
-          colors: [],
-          currency: '',
-          warning: finalWarning
-        };
-      } catch (cocoErr) {
-        console.error('Local COCO-SSD detection failed, using fallback simulation:', cocoErr);
-      }
-    }
-
-    // Default object detection simulation fallback if coco-ssd fails or is not loaded
-    await new Promise((resolve) => setTimeout(resolve, 800));
-
-    const promptStr = (customPrompt || '').toLowerCase();
-
-    if (promptStr.includes('read all text')) {
-      const textOptions = [
-        "VisionAssist: Empowering independence with computer vision.",
-        "Caution: Keep away from children.",
-        "Section 1.1: Introduction to Artificial Intelligence.",
-        "Organic Milk - Ingredients: Pasteurized Milk, Vitamin D3.",
-        "Metro Station Exit. Main Street is 100m away."
-      ];
-      let randomText = textOptions[Math.floor(Math.random() * textOptions.length)];
-      if (targetLang && targetLang !== 'en-US') {
-        randomText = translateText(randomText, targetLang);
-      }
-      return {
-        objects: [],
-        scene: '',
-        text: randomText,
-        colors: [],
-        currency: '',
-        warning: ''
-      };
-    }
-
-    if (promptStr.includes('describe this scene')) {
-      const scenes = [
-        "A tidy living room with a sofa, a coffee table, and a television.",
-        "A modern workspace with a wooden desk, a laptop, and a notebook.",
-        "An outdoor pathway with green trees, grass on the sides, and clear sky.",
-        "A kitchen counter with a microwave, toaster, and some ceramic cups."
-      ];
-      let randomScene = scenes[Math.floor(Math.random() * scenes.length)];
-      if (targetLang && targetLang !== 'en-US') {
-        randomScene = translateText(randomScene, targetLang);
-      }
-      return {
-        objects: [],
-        scene: randomScene,
-        text: '',
-        colors: [],
-        currency: '',
-        warning: ''
-      };
-    }
-
-    if (promptStr.includes('dominant colors')) {
-      const colorGroups = [
-        [{ name: 'Navy Blue', hex: '#1e3a8a' }, { name: 'White', hex: '#ffffff' }],
-        [{ name: 'Forest Green', hex: '#064e3b' }, { name: 'Soft Gray', hex: '#f1f5f9' }],
-        [{ name: 'Crimson Red', hex: '#991b1b' }, { name: 'Gold', hex: '#d97706' }],
-      ];
-      const randomColors = colorGroups[Math.floor(Math.random() * colorGroups.length)];
-      return {
-        objects: [],
-        scene: '',
-        text: '',
-        colors: randomColors,
-        currency: '',
-        warning: ''
-      };
-    }
-
-    if (promptStr.includes('currency')) {
-      const notes = ["100 Rupees note", "500 Rupees note", "50 Rupees note"];
-      let randomNote = notes[Math.floor(Math.random() * notes.length)];
-      if (targetLang && targetLang !== 'en-US') {
-        randomNote = translateText(randomNote, targetLang);
-      }
-      return {
-        objects: [],
-        scene: '',
-        text: '',
-        colors: [],
-        currency: randomNote,
-        warning: ''
-      };
-    }
-
-    if (promptStr.includes('people visible')) {
-      let pScene = 'A person standing in front of you.';
-      let pClass = 'person';
-      if (targetLang && targetLang !== 'en-US') {
-        pScene = translateText(pScene, targetLang);
-        pClass = translateText(pClass, targetLang);
-      }
-      return {
-        objects: [{ class: pClass, confidence: 0.92, position: 'center', distance: 'Medium', distanceMeters: 2.1 }],
-        scene: pScene,
-        text: '',
-        colors: [],
-        currency: '',
-        warning: ''
-      };
-    }
-
-    // Default simulated object detection pool
-    const objectPool = [
-      { class: 'chair', position: 'left' as const, distance: 'Near' as const, distanceMeters: 1.2 },
-      { class: 'laptop', position: 'center' as const, distance: 'Near' as const, distanceMeters: 0.8 },
-      { class: 'backpack', position: 'right' as const, distance: 'Medium' as const, distanceMeters: 2.4 },
-      { class: 'person', position: 'center' as const, distance: 'Medium' as const, distanceMeters: 1.8 },
-      { class: 'doorway', position: 'center' as const, distance: 'Far' as const, distanceMeters: 4.5 },
-      { class: 'water bottle', position: 'right' as const, distance: 'Near' as const, distanceMeters: 0.5 }
-    ];
-
-    // Pick 1-3 random objects
-    const numObjects = Math.floor(Math.random() * 3) + 1;
-    const selectedObjects: DetectedObject[] = [];
-    const shuffled = [...objectPool].sort(() => 0.5 - Math.random());
-    for (let i = 0; i < numObjects; i++) {
-      let className = shuffled[i].class;
-      if (targetLang && targetLang !== 'en-US') {
-        className = translateText(shuffled[i].class, targetLang);
-      }
-      selectedObjects.push({
-        class: className,
-        confidence: Math.round((0.75 + Math.random() * 0.2) * 100) / 100,
-        position: shuffled[i].position,
-        distance: shuffled[i].distance,
-        distanceMeters: shuffled[i].distanceMeters
-      });
-    }
-
-    const nearObstacle = selectedObjects.find(o => o.distanceMeters <= 1);
-    let warning = nearObstacle ? `Warning: ${nearObstacle.class} is very close at ${nearObstacle.distanceMeters} meters` : '';
-    if (warning && targetLang && targetLang !== 'en-US') {
-      warning = translateText(warning, targetLang);
-    }
-
+    // If local object detection is not available or no objects are found in the frame, return honest empty results
     return {
-      objects: selectedObjects,
-      scene: '',
+      objects: [],
+      scene: 'The path in front of you is clear. No obstacles detected.',
       text: '',
       colors: [],
       currency: '',
-      warning: warning
+      warning: ''
     };
   }
 }
@@ -756,7 +446,32 @@ export async function askGemini(
     : '';
   const prompt = `You are ${assistantName}, a friendly, caring AI voice assistant embedded in smart glasses. The user has asked: "${question}". Answer concisely in 1-3 sentences. Be direct, accurate, and warm. Do not use markdown or bullet points — only plain sentences suitable for text-to-speech.${langInstruction}`;
 
-  // 1. Try Supabase Edge Function with text-only mode (no image required)
+  // 1. Primary: Ultra-fast local Python backend powered by Groq API
+  try {
+    const response = await fetch('http://localhost:8000/api/ask-gemini', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        question,
+        lang: targetLang || 'en-US',
+        assistant_name: assistantName,
+        user_context: userContext,
+        chat_history: chatHistory
+      }),
+    });
+    if (response.ok) {
+      const data = await response.json();
+      if (data.answer && data.answer.trim().length > 0) {
+        return data.answer.trim();
+      }
+    }
+  } catch (err) {
+    console.warn("[Voice Assistant] Local Groq backend unreachable, trying Supabase cloud fallback:", err);
+  }
+
+  // 2. Secondary fallback: Supabase Edge Function with text-only mode
   try {
     const response = await fetch(`${SUPABASE_URL}/functions/v1/vision-analyze`, {
       method: 'POST',
@@ -774,32 +489,7 @@ export async function askGemini(
       }
     }
   } catch (err) {
-    console.warn("Supabase text-only Gemini query failed, trying local python backend:", err);
-  }
-
-  // 2. Fallback to local python backend
-  try {
-    const response = await fetch('http://localhost:8000/api/ask-gemini', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        question,
-        lang: targetLang || 'en-US',
-        assistant_name: assistantName,
-        user_context: userContext,
-        chat_history: chatHistory
-      }),
-    });
-    if (response.ok) {
-      const data = await response.json();
-      if (data.answer) {
-        return data.answer;
-      }
-    }
-  } catch (err) {
-    console.warn("Local Gemini query failed:", err);
+    console.warn("Supabase text-only query failed:", err);
   }
 
   // 3. Offline fallback responses for common simple questions

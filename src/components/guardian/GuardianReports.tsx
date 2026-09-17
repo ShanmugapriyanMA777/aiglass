@@ -1,5 +1,4 @@
-import React from 'react';
-import { FileText, Download, Calendar, BarChart2, Eye, ShieldAlert, Navigation } from 'lucide-react';
+import { FileText, Download } from 'lucide-react';
 
 export default function GuardianReports() {
   const handleExportCSV = () => {

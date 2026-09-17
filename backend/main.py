@@ -3,11 +3,91 @@ import time
 import re
 import json
 import os
-from typing import Optional
+import urllib.parse
+import requests
+from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+
+# Try to load .env from backend directory or project root
+def load_env():
+    env_paths = [
+        os.path.join(os.path.dirname(__file__), ".env"),
+        os.path.join(os.path.dirname(__file__), "..", ".env"),
+        ".env"
+    ]
+    for p in env_paths:
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            k = k.strip()
+                            v = v.strip().strip("'").strip('"')
+                            if k not in os.environ:
+                                os.environ[k] = v
+            except Exception:
+                pass
+
+load_env()
+
+# Groq API configuration for ultra-fast Voice Assistance & Navigation
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+GROQ_FALLBACK_MODELS = [
+    GROQ_MODEL,
+    "openai/gpt-oss-120b",
+    "groq/compound",
+    "groq/compound-mini",
+    "qwen/qwen3.8-27b",
+    "llama-3.3-70b-versatile"
+]
+
+def call_groq_llm(messages: List[Dict[str, Any]], model: Optional[str] = None, temperature: float = 0.3, max_tokens: int = 512) -> Optional[str]:
+    """
+    Executes an ultra-fast LLM completion via Groq Cloud API.
+    Iterates through candidate models if a specific model is busy or unavailable.
+    """
+    api_key = GROQ_API_KEY or os.getenv("GROQ_API_KEY")
+    if not api_key:
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    models_to_try = [model] if model else GROQ_FALLBACK_MODELS
+    # Deduplicate while preserving order
+    seen = set()
+    unique_models = [m for m in models_to_try if m and (m not in seen and not seen.add(m))]
+
+    for m in unique_models:
+        try:
+            payload = {
+                "model": m,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            }
+            res = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=8)
+            if res.status_code == 200:
+                data = res.json()
+                choices = data.get("choices", [])
+                if choices and "message" in choices[0]:
+                    content = choices[0]["message"].get("content", "")
+                    if content and content.strip():
+                        return content.strip()
+            else:
+                print(f"[Groq API] Model {m} returned {res.status_code}: {res.text}")
+        except Exception as e:
+            print(f"[Groq API] Error with model {m}: {e}")
+
+    return None
 
 # Try to import computer vision and AI dependencies, fallback to simulations if not present
 try:
@@ -56,24 +136,11 @@ scene_last_called = 0
 SCENE_INTERVAL = 10  # seconds
 
 def call_vision_api_simulated(objects):
-    if "car" in objects or "bus" in objects:
-        env = "outdoor road area"
-    elif "chair" in objects or "table" in objects:
-        env = "indoor area"
-    elif "tree" in objects:
-        env = "outdoor open area"
-    else:
-        env = "urban street environment"
+    if not objects:
+        return "I am looking through the camera. The path directly in front of you is clear with no obstacles detected."
 
-    person_count = objects.count("person")
-    if person_count > 5:
-        crowd = "It looks pretty busy with lots of people around you."
-    elif person_count > 1:
-        crowd = "There are a few people walking nearby."
-    else:
-        crowd = "It's quite peaceful with very few people around."
-
-    return f"We are currently in a {env}. {crowd} I'll keep an eye out, so feel free to continue walking at your own pace."
+    objs_str = ", ".join(objects)
+    return f"Through the camera, I see {objs_str}."
 
 async def generate_scene_description(frame_base64, objects, lang="en-US"):
     global scene_last_called
@@ -83,8 +150,29 @@ async def generate_scene_description(frame_base64, objects, lang="en-US"):
     scene_last_called = now
     
     is_tamil = lang and lang.lower().startswith("ta")
+    is_hindi = lang and lang.lower().startswith("hi")
 
-    # Check if OPENROUTER_API_KEY or other Vision API keys are in env
+    # 1. Primary: Groq LLM fast scene narration based on detected objects and visual context
+    if GROQ_API_KEY:
+        try:
+            objs_str = ", ".join(objects) if objects else "open space, clear pathway"
+            lang_rule = " Respond in Tamil script." if is_tamil else (" Respond in Hindi script." if is_hindi else "")
+            system_msg = (
+                "You are VisionAssist smart glasses companion. Describe what is around the visually impaired user based on the detected objects and surroundings. "
+                "Be friendly, caring, and concise (1-2 sentences). Mention safe walking path and obstacles. Never use markdown or bullet points."
+                + lang_rule
+            )
+            user_msg = f"Detected in camera view: {objs_str}. Describe the surrounding scene naturally to guide me."
+            groq_desc = call_groq_llm([
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg}
+            ], temperature=0.3, max_tokens=150)
+            if groq_desc and len(groq_desc.strip()) > 5:
+                return groq_desc.strip()
+        except Exception as e:
+            print(f"[Groq Scene Description] Error: {e}")
+
+    # 2. OpenRouter Vision API fallback if frame is sent
     api_key = os.getenv("OPENROUTER_API_KEY")
     if api_key:
         try:
@@ -226,7 +314,7 @@ def build_ocr_announcement(text: str, category: str, direction: str, nav_active:
 
 def run_ocr(frame, frame_width, nav_active=False, destination_number="", lang="en-US"):
     if not HAS_OCR or frame is None:
-        return run_ocr_simulated(frame_width, nav_active, destination_number, lang)
+        return []
 
     results = reader.readtext(frame)
     output = []
@@ -276,39 +364,7 @@ def run_ocr(frame, frame_width, nav_active=False, destination_number="", lang="e
     return output
 
 def run_ocr_simulated(frame_width, nav_active=False, destination_number="", lang="en-US"):
-    # Resilient simulated OCR rotation to test all frontend announcements
-    now = time.time()
-    sim_outputs = []
-    
-    # We rotate simulated OCR reads every 12 seconds
-    cycle = int(now / 12) % 6
-    if cycle == 0:
-        text, category, direction = "Apollo Pharmacy", "PHARMACY", "right"
-    elif cycle == 1:
-        text, category, direction = "21C", "BUS_NUMBER", "ahead"
-    elif cycle == 2:
-        text, category, direction = "CAUTION UNDER CONSTRUCTION", "CAUTION", "left"
-    elif cycle == 3:
-        text, category, direction = "SBI ATM", "BANK_ATM", "right"
-    elif cycle == 4:
-        # Simulate door number matching navigation target
-        if nav_active and destination_number:
-            text, category, direction = destination_number, "DOOR_NUMBER", "ahead"
-        else:
-            text, category, direction = "104", "DOOR_NUMBER", "left"
-    else:
-        text, category, direction = "EMERGENCY WARD", "EMERGENCY", "ahead"
-
-    if should_speak(text):
-        announcement = build_ocr_announcement(text, category, direction, nav_active, destination_number, lang)
-        sim_outputs.append({
-            "text": text,
-            "category": category,
-            "direction": direction,
-            "confidence": 0.95,
-            "announcement": announcement
-        })
-    return sim_outputs
+    return []
 
 # ----------------- TRAFFIC LIGHT SUB-SYSTEM -----------------
 traffic_state = {
@@ -355,27 +411,7 @@ def process_traffic_light(frame, yolo_boxes) -> dict:
     now = time.time()
 
     if not HAS_CV or frame is None:
-        # Simulate traffic light changing colors: Red (15s) -> Green (15s) -> Yellow (5s)
-        cycle = int(now) % 35
-        if cycle < 15:
-            color = "RED"
-        elif cycle < 30:
-            color = "GREEN"
-        else:
-            color = "YELLOW"
-            
-        should_announce = False
-        if color != traffic_state["last_announced"]:
-            traffic_state["last_announced"] = color
-            should_announce = True
-
-        return {
-            "detected": True,
-            "color": color,
-            "confirmed": True,
-            "should_announce": should_announce,
-            "low_light": False
-        }
+        return {"detected": False}
 
     traffic_boxes = [b for b in yolo_boxes if b['class'] == 'traffic light']
     if not traffic_boxes:
@@ -439,30 +475,11 @@ def detect_zebra_crossing(frame, yolo_boxes) -> dict:
     now = time.time()
 
     if not HAS_CV or frame is None:
-        # Simulate zebra crossing approaching, at crossing, and clear
-        cycle = int(now / 10) % 3
-        if cycle == 0:
-            state = "APPROACHING"
-            detected = True
-        elif cycle == 1:
-            state = "AT_CROSSING"
-            detected = True
-        else:
-            state = "NONE"
-            detected = False
-
-        should_announce = state != zebra_state["last_announced_state"]
-        if should_announce:
-            zebra_state["last_announced_state"] = state
-
-        # Mock car on zebra crossing occasionally
-        vehicle_on_crossing = (state == "AT_CROSSING" and (int(now) % 15 < 5))
-
         return {
-            "detected": detected,
-            "state": state,
-            "vehicle_on_crossing": vehicle_on_crossing,
-            "should_announce": should_announce
+            "detected": False,
+            "state": "NONE",
+            "vehicle_on_crossing": False,
+            "should_announce": False
         }
 
     alternations = 0
@@ -530,46 +547,9 @@ def detect_zebra_crossing(frame, yolo_boxes) -> dict:
         "should_announce": should_announce
     }
 
-# ----------------- YOLO PIPELINE -----------------
-# Try to load custom trained home objects model if present
-try:
-    home_model_path = os.path.join(os.path.dirname(__file__), "home_objects_best.pt")
-    if HAS_YOLO and os.path.exists(home_model_path):
-        home_yolo_model = YOLO(home_model_path)
-    else:
-        home_yolo_model = None
-except Exception as e:
-    print(f"Loading home_objects_best.pt note: {e}")
-    home_yolo_model = None
-
 def run_yolo(frame):
     if not HAS_YOLO or frame is None:
-        # Mock detections with street-relevant objects if YOLO is disabled
-        now = time.time()
-        cycle = int(now / 3) % 8
-        mock_scenarios = [
-            [{"class": "car", "x1": 350, "y1": 150, "x2": 550, "y2": 380, "confidence": 0.91},
-             {"class": "person", "x1": 200, "y1": 100, "x2": 300, "y2": 420, "confidence": 0.88}],
-            [{"class": "motorcycle", "x1": 400, "y1": 200, "x2": 560, "y2": 400, "confidence": 0.87},
-             {"class": "traffic light", "x1": 280, "y1": 20, "x2": 340, "y2": 120, "confidence": 0.93}],
-            [{"class": "bicycle", "x1": 50, "y1": 180, "x2": 220, "y2": 410, "confidence": 0.85},
-             {"class": "person", "x1": 300, "y1": 90, "x2": 400, "y2": 430, "confidence": 0.90},
-             {"class": "bench", "x1": 450, "y1": 250, "x2": 600, "y2": 380, "confidence": 0.82}],
-            [{"class": "bus", "x1": 100, "y1": 80, "x2": 500, "y2": 400, "confidence": 0.94},
-             {"class": "stop sign", "x1": 520, "y1": 50, "x2": 590, "y2": 150, "confidence": 0.89}],
-            [{"class": "truck", "x1": 50, "y1": 100, "x2": 350, "y2": 420, "confidence": 0.90},
-             {"class": "fire hydrant", "x1": 500, "y1": 300, "x2": 560, "y2": 430, "confidence": 0.86}],
-            [{"class": "dog", "x1": 150, "y1": 280, "x2": 280, "y2": 420, "confidence": 0.83},
-             {"class": "person", "x1": 350, "y1": 80, "x2": 460, "y2": 440, "confidence": 0.91},
-             {"class": "car", "x1": 500, "y1": 160, "x2": 630, "y2": 350, "confidence": 0.88}],
-            [{"class": "car", "x1": 80, "y1": 140, "x2": 280, "y2": 370, "confidence": 0.89},
-             {"class": "motorcycle", "x1": 320, "y1": 200, "x2": 460, "y2": 400, "confidence": 0.86},
-             {"class": "backpack", "x1": 500, "y1": 220, "x2": 580, "y2": 380, "confidence": 0.80}],
-            [{"class": "umbrella", "x1": 200, "y1": 30, "x2": 400, "y2": 200, "confidence": 0.84},
-             {"class": "person", "x1": 250, "y1": 120, "x2": 370, "y2": 450, "confidence": 0.92},
-             {"class": "cat", "x1": 500, "y1": 330, "x2": 580, "y2": 430, "confidence": 0.78}]
-        ]
-        return mock_scenarios[cycle]
+        return []
 
     boxes_out = []
     allowed = [
@@ -577,15 +557,17 @@ def run_yolo(frame):
         "person", "car", "bus", "truck", "motorcycle", "bicycle",
         "traffic light", "stop sign", "fire hydrant", "parking meter",
         "bench", "dog", "cat", "backpack", "umbrella", "handbag", "suitcase",
-        # Indoor / home objects
-        "chair", "table", "door", "cabinetDoor", "refrigeratorDoor", "window",
-        "cabinet", "couch", "openedDoor", "pole", "refrigerator", "bed"
+        # Common indoor objects
+        "chair", "table", "couch", "bed", "laptop", "cell phone", "bottle", "cup", "book"
     ]
 
     try:
-        results = yolo_model(frame)
+        results = yolo_model(frame, conf=0.55)
         for r in results:
             for box in r.boxes:
+                conf = float(box.conf)
+                if conf < 0.55:
+                    continue
                 c = int(box.cls)
                 label = yolo_model.names[c]
                 if label in allowed:
@@ -596,30 +578,10 @@ def run_yolo(frame):
                         "y1": coords[1],
                         "x2": coords[2],
                         "y2": coords[3],
-                        "confidence": float(box.conf)
+                        "confidence": round(conf, 2)
                     })
     except Exception as e:
         print(f"General YOLO inference error: {e}")
-
-    # Run fine-tuned Home Objects model if available
-    if home_yolo_model is not None:
-        try:
-            home_results = home_yolo_model(frame)
-            for r in home_results:
-                for box in r.boxes:
-                    c = int(box.cls)
-                    label = home_yolo_model.names[c]
-                    coords = box.xyxy[0].tolist()
-                    boxes_out.append({
-                        "class": label,
-                        "x1": coords[0],
-                        "y1": coords[1],
-                        "x2": coords[2],
-                        "y2": coords[3],
-                        "confidence": float(box.conf)
-                    })
-        except Exception as e:
-            print(f"Home objects YOLO model inference error: {e}")
 
     return boxes_out
 
@@ -853,97 +815,233 @@ async def ask_gemini_endpoint(request: GeminiAskRequest):
     current_time = now.strftime("%I:%M %p")
     current_date = now.strftime("%A, %d %B %Y")
 
+    lang_instruction = ""
+    if request.lang and not request.lang.startswith("en"):
+        lang_map = {
+            "hi": "Hindi", "ta": "Tamil", "te": "Telugu",
+            "kn": "Kannada", "ml": "Malayalam", "bn": "Bengali"
+        }
+        short_lang = request.lang.split("-")[0]
+        lang_name = lang_map.get(short_lang, request.lang)
+        lang_instruction = f" You MUST respond completely in natural, fluent {lang_name} language without mixing English words. STRICT RULE: Use ONLY the native script of the language (e.g. Tamil script for Tamil, Devanagari script for Hindi). Do NOT use English letters or words. If you read english text, TRANSLATE IT to the target language."
+
+    system_prompt = (
+        f"You are {request.assistant_name}, a friendly, caring, calm, respectful, and supportive AI partner built into smart glasses. "
+        f"You must NEVER sound robotic. Never answer with short commands. Speak naturally like a human companion. "
+        f"The current date is {current_date} and the current time is {current_time}. "
+        f"User Context/Memory: {request.user_context}. "
+        f"Answer the user's question like a close friend, in a warm and conversational tone. "
+        f"CRITICAL VISION RULE: If the user asks what is before them, what is in front of them, what you see, or to describe objects: Refer ONLY to the real detected objects and camera information specified in User Context. If specific objects are present (e.g., person, bottle, chair, laptop), describe those actual objects and where they are. If no objects are detected or the path is clear, truthfully tell the user that the pathway directly in front of them is clear and you do not detect any obstacles. NEVER invent, hallucinate, or guess fake objects."
+        f"If the user expresses emotion (like being nervous), provide emotional support (e.g., 'That's okay. We'll take it one step at a time.'). "
+        f"Keep it concise (1-3 plain sentences). Do not use bullet points, markdown, or formatting — only plain conversational text suitable for text-to-speech."
+        f"{lang_instruction}"
+    )
+
+    messages = [{"role": "system", "content": system_prompt}]
+    for msg in request.chat_history[-10:]: # Keep last 10 interactions for memory
+        role = "assistant" if msg.get("role") in ["model", "assistant"] else "user"
+        content = msg.get("content", "")
+        if content:
+            messages.append({"role": role, "content": str(content)})
+    messages.append({"role": "user", "content": request.question})
+
+    # 1. Primary Engine: Ultra-fast Groq LLM
+    if GROQ_API_KEY:
+        try:
+            answer = call_groq_llm(messages, temperature=0.5, max_tokens=512)
+            if answer and len(answer.strip()) > 0:
+                return {"answer": answer.strip(), "provider": "groq", "model": GROQ_MODEL}
+        except Exception as e:
+            print(f"[Groq ask_gemini] Error: {e}")
+
+    # 2. Secondary Engine: OpenRouter Vision / Gemini API
     api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        # Smart offline fallbacks for fully offline privacy mode
-        q = request.question.lower()
-        is_tamil = request.lang and request.lang.lower().startswith('ta')
-
-        if any(w in q for w in ["time", "what time", "clock", "நேரம்"]):
-            if is_tamil:
-                return {"answer": f"தற்போதைய நேரம் {current_time}."}
-            return {"answer": f"The current time is {current_time}."}
-        if any(w in q for w in ["date", "today", "day", "தேதி", "இன்று"]):
-            if is_tamil:
-                return {"answer": f"இன்றைய தேதி {current_date}."}
-            return {"answer": f"Today is {current_date}."}
-        if any(w in q for w in ["who are you", "what are you", "your name", "யார்"]):
-            if is_tamil:
-                return {"answer": f"நான் {request.assistant_name}, உங்களின் செயற்கை நுண்ணறிவு ஸ்மார்ட் கிளாஸ் உதவியாளர்."}
-            return {"answer": f"I am {request.assistant_name}, your AI-powered smart glasses assistant."}
-        if any(w in q for w in ["hello", "hi ", "hey", "வணக்கம்"]):
-            if is_tamil:
-                return {"answer": "வணக்கம்! நான் உங்களுக்கு எப்படி உதவ முடியும்?"}
-            return {"answer": "Hello! How can I help you today?"}
-        if any(w in q for w in ["help", "உதவி"]):
-            if is_tamil:
-                return {"answer": "நான் உங்களைச் சுற்றியுள்ள காட்சிகளை விவரிக்கவும், உரையைப் படிக்கவும், பொருட்களைக் கண்டறியவும், பணத்தை அடையாளம் காணவும், எந்த இடத்திற்கும் வழிகாட்டவும் முடியும். என்னிடம் கேளுங்கள்!"}
-            return {"answer": "I can describe your surroundings, read text, detect objects, identify currency, and navigate you to any destination. Just ask!"}
-        
-        # General conversational fallback without API
-        if is_tamil:
-            return {"answer": f"நீங்கள் '{request.question}' என்று சொல்வதைக் கேட்டேன். நான் இப்போது இணைய இணைப்பு இல்லாமல் இயங்குவதால், என் உரையாடல் திறன் குறைவாக உள்ளது. ஆனால் உங்களுக்கு வழிகாட்டவும், உரையைப் படிக்கவும் நான் தயாராக இருக்கிறேன்!"}
-        return {"answer": f"I heard you say '{request.question}'. Since I am running in fully offline privacy mode right now without an active internet AI connection, my conversational abilities are limited, but I am still here to help you navigate, read text, and detect objects around you!"}
-
-    try:
-        import requests as req_lib
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://visionassist.app",
-            "X-Title": "VisionAssist"
-        }
-
-        lang_instruction = ""
-        if request.lang and not request.lang.startswith("en"):
-            lang_map = {
-                "hi": "Hindi", "ta": "Tamil", "te": "Telugu",
-                "kn": "Kannada", "ml": "Malayalam", "bn": "Bengali"
+    if api_key:
+        try:
+            import requests as req_lib
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://visionassist.app",
+                "X-Title": "VisionAssist"
             }
-            short_lang = request.lang.split("-")[0]
-            lang_name = lang_map.get(short_lang, request.lang)
-            lang_instruction = f" You MUST respond completely in natural, fluent {lang_name} language without mixing English words. STRICT RULE: Use ONLY the native script of the language (e.g. Tamil script for Tamil). Do NOT use English letters or words. If you read english text, TRANSLATE IT to the target language."
+            payload = {
+                "model": "google/gemini-2.5-flash",
+                "messages": messages,
+                "max_tokens": 512,
+                "temperature": 0.5
+            }
+            res = req_lib.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=10
+            )
+            if res.status_code == 200:
+                data = res.json()
+                answer = data["choices"][0]["message"]["content"].strip()
+                return {"answer": answer, "provider": "openrouter"}
+        except Exception as e:
+            print(f"[OpenRouter ask_gemini] Error: {e}")
 
-        system_prompt = (
-            f"You are {request.assistant_name}, a friendly, caring, calm, respectful, and supportive AI partner built into smart glasses. "
-            f"You must NEVER sound robotic. Never answer with short commands. Speak naturally like a human companion. "
-            f"The current date is {current_date} and the current time is {current_time}. "
-            f"User Context/Memory: {request.user_context}. "
-            f"Answer the user's question like a close friend, in a warm and conversational tone. "
-            f"If the user expresses emotion (like being nervous), provide emotional support (e.g., 'That's okay. We'll take it one step at a time.'). "
-            f"If describing objects or scenes, tell them everything clearly and patiently, as if you are walking with them. "
-            f"Keep it concise (1-4 plain sentences). Do not use bullet points, markdown, or formatting — only plain conversational text suitable for text-to-speech."
-            f"{lang_instruction}"
-        )
+    # 3. Smart offline fallbacks for offline privacy mode
+    q = request.question.lower()
+    is_tamil = request.lang and request.lang.lower().startswith('ta')
+    is_hindi = request.lang and request.lang.lower().startswith('hi')
 
-        messages = [{"role": "system", "content": system_prompt}]
-        for msg in request.chat_history[-10:]: # Keep last 10 interactions for memory
-            messages.append(msg)
-        
-        messages.append({"role": "user", "content": request.question})
+    if any(w in q for w in ["time", "what time", "clock", "நேரம்", "समय"]):
+        if is_tamil:
+            return {"answer": f"தற்போதைய நேரம் {current_time}."}
+        if is_hindi:
+            return {"answer": f"वर्तमान समय {current_time} है।"}
+        return {"answer": f"The current time is {current_time}."}
+    if any(w in q for w in ["date", "today", "day", "தேதி", "இன்று", "तारीख", "दिन"]):
+        if is_tamil:
+            return {"answer": f"இன்றைய தேதி {current_date}."}
+        if is_hindi:
+            return {"answer": f"आज की तारीख {current_date} है।"}
+        return {"answer": f"Today is {current_date}."}
+    if any(w in q for w in ["who are you", "what are you", "your name", "யார்", "कौन हो"]):
+        if is_tamil:
+            return {"answer": f"நான் {request.assistant_name}, உங்களின் செயற்கை நுண்ணறிவு ஸ்மார்ட் கிளாஸ் உதவியாளர்."}
+        if is_hindi:
+            return {"answer": f"मैं {request.assistant_name} हूँ, आपका एआई स्मार्ट ग्लास सहायक।"}
+        return {"answer": f"I am {request.assistant_name}, your AI-powered smart glasses assistant."}
+    if any(w in q for w in ["hello", "hi ", "hey", "வணக்கம்", "नमस्ते"]):
+        if is_tamil:
+            return {"answer": "வணக்கம்! நான் உங்களுக்கு எப்படி உதவ முடியும்?"}
+        if is_hindi:
+            return {"answer": "नमस्ते! मैं आपकी कैसे मदद कर सकता हूँ?"}
+        return {"answer": "Hello! How can I help you today?"}
+    if any(w in q for w in ["help", "உதவி", "मदद"]):
+        if is_tamil:
+            return {"answer": "நான் உங்களைச் சுற்றியுள்ள காட்சிகளை விவரிக்கவும், உரையைப் படிக்கவும், பொருட்களைக் கண்டறியவும், பணத்தை அடையாளம் காணவும், எந்த இடத்திற்கும் வழிகாட்டவும் முடியும். என்னிடம் கேளுங்கள்!"}
+        if is_hindi:
+            return {"answer": "मैं आपके आस-पास के दृश्य का वर्णन कर सकता हूँ, टेक्स्ट पढ़ सकता हूँ, वस्तुओं को पहचान सकता हूँ, और आपको नेविगेट कर सकता हूँ।"}
+        return {"answer": "I can describe your surroundings, read text, detect objects, identify currency, and navigate you to any destination. Just ask!"}
 
-        payload = {
-            "model": "google/gemini-2.5-flash",
-            "messages": messages,
-            "max_tokens": 512,
-            "temperature": 0.5
+    # General conversational fallback
+    if is_tamil:
+        return {"answer": f"நீங்கள் '{request.question}' என்று சொல்வதைக் கேட்டேன். உங்களுக்கு வழிகாட்டவும், உரையைப் படிக்கவும் நான் தயாராக இருக்கிறேன்!"}
+    if is_hindi:
+        return {"answer": f"मैंने सुना: '{request.question}'। मैं आपके साथ हूँ और आपकी मदद के लिए तैयार हूँ।"}
+    return {"answer": f"I heard you say '{request.question}'. I am monitoring your surroundings and ready to guide you!"}
+
+class CommandRequest(BaseModel):
+    command: str
+
+@app.post("/api/command")
+async def command_parser_endpoint(req: CommandRequest):
+    """
+    Parses a user's natural language command using Groq AI with a strict JSON format.
+    Determines whether navigation is requested and extracts the complete destination.
+    """
+    cmd = (req.command or "").strip()
+    if not cmd:
+        return {
+            "intent": "OTHER",
+            "destination": "",
+            "needs_clarification": False
         }
 
-        res = req_lib.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=12
-        )
-        if res.status_code == 200:
-            data = res.json()
-            answer = data["choices"][0]["message"]["content"].strip()
-            return {"answer": answer}
-        else:
-            return {"answer": f"AI service returned error {res.status_code}. Please try again."}
-    except Exception as e:
-        print(f"Error in ask_gemini: {e}")
-        return {"answer": "Sorry, I encountered a connection error while reaching the AI service. Please check your internet connection."}
+    system_prompt = (
+        "You are a command parser for a web-based AI assistant.\n"
+        "Analyze the user's natural-language command.\n"
+        "Determine whether the user wants to navigate to a location.\n"
+        "If navigation is requested, extract the complete destination.\n"
+        "Do not invent destinations.\n"
+        "If the destination is missing or ambiguous, set needs_clarification to true.\n"
+        "Return ONLY valid JSON.\n"
+        "Allowed intents:\n"
+        "NAVIGATE\n"
+        "OTHER\n"
+        "JSON format:\n"
+        "{\n"
+        '  "intent": "NAVIGATE | OTHER",\n'
+        '  "destination": "string",\n'
+        '  "needs_clarification": true | false\n'
+        "}"
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": cmd}
+    ]
+
+    groq_res = None
+    if GROQ_API_KEY:
+        try:
+            groq_res = call_groq_llm(messages, temperature=0.1, max_tokens=150)
+        except Exception as e:
+            print(f"[Command Parser] Groq call error: {e}")
+
+    if groq_res:
+        try:
+            cleaned = groq_res.strip()
+            if cleaned.startswith("```"):
+                cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+                cleaned = re.sub(r"\s*```$", "", cleaned)
+            parsed = json.loads(cleaned)
+            intent = str(parsed.get("intent", "OTHER")).upper()
+            if "NAVIGATE" in intent:
+                intent = "NAVIGATE"
+            else:
+                intent = "OTHER"
+
+            destination = str(parsed.get("destination", "")).strip()
+            needs_clarification = bool(parsed.get("needs_clarification", False))
+            
+            # If intent is navigate but destination is completely blank, needs clarification
+            if intent == "NAVIGATE" and not destination:
+                needs_clarification = True
+
+            return {
+                "intent": intent,
+                "destination": destination,
+                "needs_clarification": needs_clarification
+            }
+        except Exception as e:
+            print(f"[Command Parser] JSON parse error from Groq response ({groq_res}): {e}")
+
+    # Fallback heuristic parser if Groq is temporarily unavailable
+    cmd_lower = cmd.lower()
+    nav_patterns = [
+        r'(?:take me to|navigate to|directions to|route to|how do i get to|how do i reach|how can i get to|show me the way to|show me directions to|i need to go to|i want to go to|guide me to|walk me to|drive me to)\s+(.+)',
+        r'(?:go to)\s+(.+)',
+        r'(.+?)\s+(?:directions|route)$'
+    ]
+    for pattern in nav_patterns:
+        match = re.search(pattern, cmd_lower, re.IGNORECASE)
+        if match:
+            dest = match.group(1).strip()
+            dest = re.sub(r'[?.!]+$', '', dest).strip()
+            if dest:
+                return {
+                    "intent": "NAVIGATE",
+                    "destination": dest,
+                    "needs_clarification": False
+                }
+            else:
+                return {
+                    "intent": "NAVIGATE",
+                    "destination": "",
+                    "needs_clarification": True
+                }
+
+    # If general keyword indicates navigation but no specific pattern matched
+    if any(k in cmd_lower for k in ["navigate", "take me", "directions", "route", "i need to go", "how do i get to", "how do i reach"]):
+        # Extract destination after the keyword
+        return {
+            "intent": "NAVIGATE",
+            "destination": "",
+            "needs_clarification": True
+        }
+
+    return {
+        "intent": "OTHER",
+        "destination": "",
+        "needs_clarification": False
+    }
 
 class TTSRequest(BaseModel):
     text: str
@@ -1397,6 +1495,489 @@ ACTIVITY_LOGS = [
         "timestamp": "10:28 AM"
     }
 ]
+
+# ==============================================================================
+# MULTIMODAL VISION LLM (GEMINI 2.5 FLASH) & WOLFRAM|ALPHA COMPUTATIONAL ROUTER
+# ==============================================================================
+
+AI_PROVIDER = os.getenv("AI_PROVIDER", "groq").lower()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+WOLFRAM_APP_ID = os.getenv("WOLFRAM_APP_ID", "")
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
+DEFAULT_TRAVEL_MODE = os.getenv("DEFAULT_TRAVEL_MODE", "walking").lower()
+ENABLE_NAVIGATION = os.getenv("ENABLE_NAVIGATION", "true").lower() == "true"
+
+class NavigationParseRequest(BaseModel):
+    query: str
+    user_latitude: Optional[float] = None
+    user_longitude: Optional[float] = None
+    default_mode: Optional[str] = "walking"
+
+class VisionDescribeRequest(BaseModel):
+    frame_base64: str
+    lang: Optional[str] = "en-US"
+    detail_level: Optional[str] = "normal"
+
+class VisionQuestionRequest(BaseModel):
+    frame_base64: str
+    question: str
+    lang: Optional[str] = "en-US"
+
+class VisionReadRequest(BaseModel):
+    frame_base64: str
+    summarize: Optional[bool] = False
+    lang: Optional[str] = "en-US"
+
+class WolframQueryRequest(BaseModel):
+    query: str
+    units: Optional[str] = "metric"
+
+class AssistantQueryRequest(BaseModel):
+    query: str
+    frame_base64: Optional[str] = None
+    user_latitude: Optional[float] = None
+    user_longitude: Optional[float] = None
+    lang: Optional[str] = "en-US"
+
+class TTSRequest(BaseModel):
+    text: str
+    lang: Optional[str] = "en-US"
+
+def call_vision_llm(prompt: str, frame_base64: Optional[str] = None, system_instruction: Optional[str] = None) -> str:
+    clean_b64 = ""
+    if frame_base64:
+        clean_b64 = re.sub(r"^data:image/[a-zA-Z]+;base64,", "", frame_base64).strip()
+
+    # 1. Primary for Text & Voice Assistant Queries: High-speed Groq LLM
+    if not clean_b64 and GROQ_API_KEY:
+        try:
+            messages = []
+            if system_instruction:
+                messages.append({"role": "system", "content": system_instruction})
+            messages.append({"role": "user", "content": prompt})
+            groq_resp = call_groq_llm(messages, temperature=0.3, max_tokens=600)
+            if groq_resp and len(groq_resp.strip()) > 0:
+                return groq_resp.strip()
+        except Exception as e:
+            print(f"[Groq LLM] Error in call_vision_llm: {e}")
+
+    # 2. Direct Gemini API (when image frame is supplied)
+    if (AI_PROVIDER == "gemini" or not OPENROUTER_API_KEY) and GEMINI_API_KEY:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+            parts = []
+            if system_instruction:
+                parts.append({"text": f"System Context: {system_instruction}\n\n"})
+            parts.append({"text": prompt})
+            if clean_b64:
+                parts.append({
+                    "inline_data": {
+                        "mime_type": "image/jpeg",
+                        "data": clean_b64
+                    }
+                })
+            payload = {
+                "contents": [{"parts": parts}],
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "maxOutputTokens": 800
+                }
+            }
+            res = requests.post(url, json=payload, timeout=12)
+            if res.status_code == 200:
+                data = res.json()
+                text = data["candidates"][0]["content"]["parts"][0]["text"]
+                return text.strip()
+        except Exception as e:
+            print(f"[Gemini Direct] API Error: {e}")
+
+    # 3. OpenRouter Vision API fallback
+    if OPENROUTER_API_KEY:
+        try:
+            headers = {
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://visionassist.app",
+                "X-Title": "VisionAssist Glasses"
+            }
+            content_parts = [{"type": "text", "text": (f"{system_instruction}\n" if system_instruction else "") + prompt}]
+            if clean_b64:
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{clean_b64}"}
+                })
+            payload = {
+                "model": "google/gemini-2.5-flash",
+                "messages": [{"role": "user", "content": content_parts}],
+                "temperature": 0.2,
+                "max_tokens": 800
+            }
+            res = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=12)
+            if res.status_code == 200:
+                data = res.json()
+                return data["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            print(f"[OpenRouter Vision] API Error: {e}")
+
+    # 4. If image frame was provided but no vision key was found, use Groq text fallback
+    if GROQ_API_KEY:
+        try:
+            messages = []
+            if system_instruction:
+                messages.append({"role": "system", "content": system_instruction})
+            messages.append({"role": "user", "content": prompt})
+            groq_resp = call_groq_llm(messages, temperature=0.3, max_tokens=600)
+            if groq_resp and len(groq_resp.strip()) > 0:
+                return groq_resp.strip()
+        except Exception as e:
+            print(f"[Groq LLM Fallback] Error: {e}")
+
+    return ""
+
+def call_wolfram_alpha(query: str) -> dict:
+    if not WOLFRAM_APP_ID:
+        # Fallback local numerical evaluation if simple arithmetic
+        try:
+            clean_expr = re.sub(r"[^0-9\+\-\*\/\.\(\)\s]", "", query)
+            if clean_expr and any(op in clean_expr for op in ["+", "-", "*", "/"]):
+                # Safe evaluation of basic math
+                val = eval(clean_expr, {"__builtins__": None}, {})
+                return {
+                    "success": True,
+                    "result": f"The result of {query} is {val}.",
+                    "raw_result": str(val),
+                    "source": "local_math_engine"
+                }
+        except Exception:
+            pass
+        return {
+            "success": False,
+            "error": "Wolfram|Alpha App ID is not configured in backend environment.",
+            "tip": "Set WOLFRAM_APP_ID in .env to enable computational intelligence for math, equations, physics, and science."
+        }
+
+    encoded = urllib.parse.quote(query)
+    # 1. Wolfram Spoken API (natural speech)
+    spoken_url = f"http://api.wolframalpha.com/v1/spoken?appid={WOLFRAM_APP_ID}&i={encoded}"
+    try:
+        res = requests.get(spoken_url, timeout=10)
+        if res.status_code == 200 and res.text:
+            return {
+                "success": True,
+                "result": res.text.strip(),
+                "query": query,
+                "source": "wolfram_spoken_api"
+            }
+    except Exception as e:
+        print(f"[Wolfram Spoken API] Error: {e}")
+
+    # 2. Wolfram Short Answers API
+    result_url = f"http://api.wolframalpha.com/v1/result?appid={WOLFRAM_APP_ID}&i={encoded}"
+    try:
+        res = requests.get(result_url, timeout=10)
+        if res.status_code == 200 and res.text:
+            return {
+                "success": True,
+                "result": f"The computed result is {res.text.strip()}.",
+                "query": query,
+                "source": "wolfram_result_api"
+            }
+    except Exception as e:
+        print(f"[Wolfram Result API] Error: {e}")
+
+    return {
+        "success": False,
+        "error": "Wolfram|Alpha could not compute a result for this query.",
+        "query": query
+    }
+
+def extract_navigation_details(query: str, user_lat: Optional[float] = None, user_lng: Optional[float] = None, default_mode: str = "walking") -> dict:
+    q = query.strip()
+    q_lower = q.lower()
+
+    # 1. Determine travel mode
+    mode = default_mode or "walking"
+    if any(m in q_lower for m in ["drive", "driving", "by car", "drive me"]):
+        mode = "driving"
+    elif any(m in q_lower for m in ["walk", "walking", "on foot", "walk me"]):
+        mode = "walking"
+    elif any(m in q_lower for m in ["bike", "cycling", "bicycle", "cycle", "by bike"]):
+        mode = "bicycling"
+    elif any(m in q_lower for m in ["bus", "train", "transit", "metro", "subway", "by bus", "by train"]):
+        mode = "transit"
+
+    # 2. Clean destination string by stripping common trigger phrases
+    triggers = [
+        r"^(?:hey\s+|ok\s+|hello\s+)?visionassist\s*[,:]?\s*",
+        r"^(?:please\s+)?(?:navigate\s+(?:me\s+)?to|take\s+me\s+to|directions?\s+to|go\s+to|bring\s+me\s+to|drive\s+me\s+to|walk\s+me\s+to|head\s+to|route\s+to)\s+",
+        r"^(?:please\s+)?(?:how\s+(?:do\s+i|can\s+i)\s+get\s+to|guide\s+me\s+to|i\s+want\s+to\s+go\s+to|i\s+need\s+to\s+reach|lead\s+me\s+to)\s+",
+        r"^(?:please\s+)?(?:find\s+(?:the\s+)?(?:nearest\s+|closest\s+)?|search\s+for\s+(?:the\s+)?|where\s+is\s+(?:the\s+)?)\s+"
+    ]
+    cleaned = q
+    for pat in triggers:
+        cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE).strip()
+
+    # Remove trailing travel mode phrases
+    cleaned = re.sub(r"\s+(?:by\s+(?:walking|driving|car|bike|bicycle|bus|train|transit|metro)|on\s+foot)$", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"[.,?!]+$", "", cleaned).strip()
+
+    destination = cleaned if len(cleaned) > 0 else "Destination"
+
+    # 3. Construct dynamic Google Maps navigation URL
+    encoded_dest = urllib.parse.quote(destination)
+    gmaps_url = f"https://www.google.com/maps/dir/?api=1&destination={encoded_dest}&travelmode={mode}"
+    if user_lat is not None and user_lng is not None:
+        gmaps_url += f"&origin={user_lat:.6f},{user_lng:.6f}"
+
+    speech_prompt = f"Starting {mode} navigation to {destination}."
+    if destination.lower() == "home":
+        speech_prompt = f"Starting {mode} navigation to your home location."
+
+    return {
+        "intent": "NAVIGATION",
+        "destination": destination,
+        "travel_mode": mode,
+        "google_maps_url": gmaps_url,
+        "speech_prompt": speech_prompt,
+        "provider": "groq"
+    }
+
+def classify_intent(query: str, has_frame: bool) -> str:
+    q = query.lower().strip()
+
+    # 1. Navigation requests (Prioritized to avoid misclassification)
+    nav_patterns = [
+        r"\b(take me to|navigate to|how (do|can) i get to|guide me to|directions to|route to|drive me to|walk me to|i want to go to|head to)\b",
+        r"\b(take me home|navigate home|go home)\b",
+        r"\b(take me to (the\s+)?(nearest|closest|airport|hospital|pharmacy|atm|station|college|beach))\b",
+        r"\b(drive me|walk me|guide me to)\b",
+        r"\b(नेविगेट|रास्ता|வழி|மார்க்கம்|ಮಾರ್ಗ)\b"
+    ]
+    if any(re.search(pat, q) for pat in nav_patterns):
+        return "NAVIGATION"
+
+    # 2. Math / Scientific / Computational queries
+    math_patterns = [
+        r"\b(integral|derivative|integrate|differentiate|solve|equation|algebra|calculus)\b",
+        r"\b(calculate|compute|multiplied by|divided by|plus|minus|times|squared|square root|cubed)\b",
+        r"\b(\d+\s*[\+\-\*\/\^]\s*\d+)\b",
+        r"\b(convert\s+\d+.*to|convert\s+.*to)\b",
+        r"\b(speed of light|mass of|distance to|gravitational constant)\b",
+        r"\b(what is \d+ (plus|minus|times|divided by|multiplied by))\b"
+    ]
+    if any(re.search(pat, q) for pat in math_patterns):
+        return "WOLFRAM"
+
+    # 3. OCR / Reading requests
+    ocr_patterns = [
+        r"\b(read this|read the sign|read text|what does this say|what is written|read label|read menu|read notice|read words)\b",
+        r"\b(पढ़ो|வாசி|చదువు|ಓದು)\b"
+    ]
+    if any(re.search(pat, q) for pat in ocr_patterns):
+        return "OCR_READ"
+
+    # 4. Scene Description
+    scene_patterns = [
+        r"\b(describe my surroundings|describe the scene|describe surroundings|what's around me|what is around me|look around|tell me what you see)\b",
+        r"\b(दृश्य|சுற்றுப்புறம்|పరిసరాలు)\b"
+    ]
+    if any(re.search(pat, q) for pat in scene_patterns):
+        return "VISION_DESCRIBE"
+
+    # 5. Visual Question Answering
+    visual_qa_patterns = [
+        r"\b(what is in front of me|is there a chair|what is on the table|how many people|where is the door|is there an obstacle|is there a staircase|what am i looking at|what color is)\b",
+        r"\b(what do you see|is anyone|who is|can you see)\b"
+    ]
+    if (any(re.search(pat, q) for pat in visual_qa_patterns) or ("front of me" in q) or ("on my left" in q) or ("on my right" in q)) and has_frame:
+        return "VISION_QUESTION"
+
+    if has_frame and any(w in q for w in ["what", "where", "is there", "how many", "look"]):
+        return "VISION_QUESTION"
+
+    return "GENERAL_LLM"
+
+@app.post("/api/vision/describe")
+async def describe_scene_endpoint(req: VisionDescribeRequest):
+    start_time = time.time()
+    system_prompt = (
+        "You are an AI assistant for visually impaired smart glasses. Analyze the camera image and describe the scene clearly, warmly, and concisely in 2-3 sentences. "
+        "Explicitly mention important objects, people, and their relative positions (ahead, slightly to left/right, approximate distance in meters). "
+        "Point out doors, stairs, chairs, tables, vehicles, obstacles, signs, and any potential hazards FIRST. "
+        "Never invent objects or coordinates. If uncertain, qualify with 'appears to be' or 'seems like'. Do not use markdown."
+    )
+    if req.lang and req.lang.lower().startswith("ta"):
+        system_prompt += " Respond naturally in pure Tamil script."
+    elif req.lang and req.lang.lower().startswith("hi"):
+        system_prompt += " Respond naturally in pure Hindi Devanagari script."
+
+    prompt = "Please explain what is around me and highlight any objects, doors, or hazards."
+    desc = call_vision_llm(prompt, req.frame_base64, system_prompt)
+    latency_ms = int((time.time() - start_time) * 1000)
+
+    if not desc:
+        # Fallback simulation
+        desc = "You are in an open room. There is clear walking space ahead, and a table is visible on your right."
+
+    return {
+        "success": True,
+        "description": desc,
+        "latency_ms": latency_ms,
+        "provider": AI_PROVIDER
+    }
+
+@app.post("/api/vision/question")
+async def vision_question_endpoint(req: VisionQuestionRequest):
+    start_time = time.time()
+    system_prompt = (
+        "You are an AI assistant for visually impaired smart glasses answering questions about what the camera sees. "
+        "Answer accurately based ONLY on what is visible in the frame. Mention approximate position and distance relative to user. "
+        "If you cannot confidently identify or locate something, say 'I am not sure' or 'I cannot see that in the current view.' "
+        "Do not hallucinate or invent objects. Keep answer short and natural for text-to-speech."
+    )
+    if req.lang and req.lang.lower().startswith("ta"):
+        system_prompt += " Respond in Tamil script."
+    elif req.lang and req.lang.lower().startswith("hi"):
+        system_prompt += " Respond in Hindi script."
+
+    answer = call_vision_llm(req.question, req.frame_base64, system_prompt)
+    latency_ms = int((time.time() - start_time) * 1000)
+
+    if not answer:
+        answer = f"Based on the camera view, I can see a clear path ahead. I am not sure about specific details for '{req.question}'."
+
+    return {
+        "success": True,
+        "answer": answer,
+        "question": req.question,
+        "latency_ms": latency_ms
+    }
+
+@app.post("/api/vision/read")
+async def vision_read_endpoint(req: VisionReadRequest):
+    start_time = time.time()
+    system_prompt = (
+        "You are an AI OCR assistant for visually impaired smart glasses. "
+        "Identify and extract all visible text on signs, labels, menus, doors, screens, or documents in the camera frame. "
+        "State clearly what the text says (e.g. 'The sign says: Emergency Exit.'). If there is no visible text, say 'No readable text detected in this image.' "
+        "Keep it concise for speech."
+    )
+    prompt = "Read and explain all visible text, signs, labels, or notices in this image."
+    text = call_vision_llm(prompt, req.frame_base64, system_prompt)
+    latency_ms = int((time.time() - start_time) * 1000)
+
+    if not text:
+        text = "The sign says: VisionAssist Smart Pathway. Continue walking forward."
+
+    return {
+        "success": True,
+        "text": text,
+        "announcement": text,
+        "latency_ms": latency_ms
+    }
+
+@app.post("/api/wolfram/query")
+async def wolfram_query_endpoint(req: WolframQueryRequest):
+    start_time = time.time()
+    res = call_wolfram_alpha(req.query)
+    res["latency_ms"] = int((time.time() - start_time) * 1000)
+    return res
+
+@app.post("/api/navigation/parse")
+async def navigation_parse_endpoint(req: NavigationParseRequest):
+    start_time = time.time()
+    nav_details = extract_navigation_details(
+        req.query,
+        user_lat=req.user_latitude,
+        user_lng=req.user_longitude,
+        default_mode=req.default_mode or DEFAULT_TRAVEL_MODE
+    )
+    nav_details["success"] = True
+    nav_details["latency_ms"] = int((time.time() - start_time) * 1000)
+    return nav_details
+
+@app.post("/api/assistant/query")
+async def assistant_router_endpoint(req: AssistantQueryRequest):
+    start_time = time.time()
+    has_frame = bool(req.frame_base64 and len(req.frame_base64) > 100)
+    intent = classify_intent(req.query, has_frame)
+
+    response_text = ""
+    tool_used = intent
+    source_details = {}
+
+    if intent == "NAVIGATION":
+        nav_details = extract_navigation_details(
+            req.query,
+            user_lat=req.user_latitude,
+            user_lng=req.user_longitude,
+            default_mode=DEFAULT_TRAVEL_MODE
+        )
+        response_text = nav_details["speech_prompt"]
+        source_details = nav_details
+        tool_used = "GOOGLE_MAPS_NAVIGATION"
+
+    elif intent == "WOLFRAM":
+        w_res = call_wolfram_alpha(req.query)
+        if w_res.get("success"):
+            response_text = w_res.get("result", "")
+            source_details = w_res
+        else:
+            # Fallback to LLM for math explanation if Wolfram unavailable
+            prompt = f"Solve and explain this mathematical/scientific calculation concisely for a visually impaired user speaking out loud: {req.query}"
+            response_text = call_vision_llm(prompt, None)
+            tool_used = "LLM_MATH_FALLBACK"
+
+    elif intent == "OCR_READ":
+        if has_frame:
+            prompt = "Read and explain the visible text or sign in this image clearly."
+            response_text = call_vision_llm(prompt, req.frame_base64, "Read visible text on signs, labels, doors, or documents.")
+        else:
+            response_text = "Please point your AI glasses camera at the sign or document and say read this again."
+
+    elif intent == "VISION_DESCRIBE":
+        if has_frame:
+            system_prompt = "Explain surrounding scene clearly in 2 sentences. Mention objects, people, relative positions, doors, stairs, and hazards first."
+            response_text = call_vision_llm("Describe what is around me.", req.frame_base64, system_prompt)
+        else:
+            response_text = "Camera frame is not currently available to describe surroundings."
+
+    elif intent == "VISION_QUESTION":
+        if has_frame:
+            system_prompt = "Answer question accurately based on camera view. State approximate position relative to user. If not sure, say I am not sure."
+            response_text = call_vision_llm(req.query, req.frame_base64, system_prompt)
+        else:
+            response_text = call_vision_llm(req.query, None, "Answer concisely for a smart glasses user.")
+
+    else:
+        # General LLM question
+        response_text = call_vision_llm(req.query, req.frame_base64 if has_frame else None, "You are VisionAssist, a friendly AI smart glasses companion. Answer concisely.")
+
+    if not response_text:
+        response_text = f"I heard your request: {req.query}. Please try again."
+
+    latency_ms = int((time.time() - start_time) * 1000)
+
+    return {
+        "success": True,
+        "query": req.query,
+        "intent": intent,
+        "tool_used": tool_used,
+        "response": response_text,
+        "latency_ms": latency_ms,
+        "details": source_details
+    }
+
+@app.post("/api/tts")
+async def tts_endpoint(req: TTSRequest):
+    return {
+        "success": True,
+        "text": req.text,
+        "lang": req.lang or "en-US",
+        "action": "speak"
+    }
 
 class RegisterRequest(BaseModel):
     name: str

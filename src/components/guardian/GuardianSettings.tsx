@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Settings, Shield, Bell, Lock, Smartphone, CheckCircle2 } from 'lucide-react';
+import { useState } from 'react';
+import { Settings, Shield, CheckCircle2 } from 'lucide-react';
 
 export default function GuardianSettings() {
   const [shareLocation, setShareLocation] = useState(true);

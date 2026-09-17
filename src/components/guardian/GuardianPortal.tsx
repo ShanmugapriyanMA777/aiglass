@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Shield, MapPin, AlertTriangle, Activity, FileText, Settings, LogOut, ArrowLeft, User, Bell } from 'lucide-react';
+import { useState } from 'react';
+import { Shield, MapPin, AlertTriangle, Activity, FileText, Settings, LogOut, ArrowLeft, Bell } from 'lucide-react';
 import GuardianLogin from './GuardianLogin';
 import GuardianDashboard from './GuardianDashboard';
 import GuardianTracking from './GuardianTracking';
@@ -13,7 +13,7 @@ interface GuardianPortalProps {
 }
 
 export default function GuardianPortal({ onExitPortal }: GuardianPortalProps) {
-  const [user, setUser] = useState<{ name: string; email: string; id: string }>(() => {
+  const [user, setUser] = useState<{ name: string; email: string; id: string } | null>(() => {
     try {
       const saved = localStorage.getItem('vg_guardian_user');
       if (saved) return JSON.parse(saved);
