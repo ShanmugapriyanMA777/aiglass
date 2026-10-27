@@ -296,7 +296,11 @@ export default function Dashboard({ onExit, onOpenGuardian, isOffline = false }:
 
     // Street Object Awareness state update (quiet, no unprompted background chatter)
     if (result.street_objects && result.street_objects.length > 0) {
-      setStreetObjects(result.street_objects);
+      const filtered = result.street_objects.filter((o: any) => {
+        const c = (o.class || '').toLowerCase();
+        return c !== 'dog' && c !== 'mother';
+      });
+      setStreetObjects(filtered);
     } else {
       setStreetObjects([]);
     }
@@ -433,12 +437,15 @@ export default function Dashboard({ onExit, onOpenGuardian, isOffline = false }:
       const savedFaces = await getItem<string[] | null>('visionassist_registered_faces', null);
       if (savedFaces) {
         try {
-          setRegisteredFaces(typeof savedFaces === 'string' ? JSON.parse(savedFaces) : savedFaces);
+          const parsed = typeof savedFaces === 'string' ? JSON.parse(savedFaces) : savedFaces;
+          const filtered = Array.isArray(parsed) ? parsed.filter((f: string) => f && f.toLowerCase() !== 'mother') : [];
+          setRegisteredFaces(filtered);
+          await setItem('visionassist_registered_faces', filtered);
         } catch {
-          setRegisteredFaces(['Mother', 'Raj']);
+          setRegisteredFaces([]);
         }
       } else {
-        const defaultFaces = ['Mother', 'Raj'];
+        const defaultFaces: string[] = [];
         await setItem('visionassist_registered_faces', defaultFaces);
         setRegisteredFaces(defaultFaces);
       }
@@ -1158,7 +1165,7 @@ export default function Dashboard({ onExit, onOpenGuardian, isOffline = false }:
   // Obstacle alerts tracking helper
   const processObstacleAlerts = useCallback((objects: any[]) => {
     const priorityClasses = ['vehicle', 'car', 'bus', 'truck', 'motorcycle', 'bicycle', 'person', 'pole', 'stairs', 'staircase', 'chair', 'backpack', 'bottle'];
-    const dangerousObjects = objects.filter(o => o.distanceMeters <= 3.5);
+    const dangerousObjects = objects.filter(o => o.distanceMeters <= 3.5 && (o.class || '').toLowerCase() !== 'dog');
     if (dangerousObjects.length === 0) return;
 
     // Sort by priority class index then by closest distance
@@ -1253,7 +1260,11 @@ export default function Dashboard({ onExit, onOpenGuardian, isOffline = false }:
         try {
           if (typeof window !== 'undefined' && (window as any).cocoSsd) {
             const model = await getLocalModel();
-            const predictions = await model.detect(videoRef.current);
+            const rawPredictions = await model.detect(videoRef.current);
+            const predictions = (rawPredictions || []).filter((p: any) => {
+              const c = (p.class || '').toLowerCase();
+              return c !== 'dog';
+            });
             
             drawBoundingBoxes(
               predictions,
@@ -1287,8 +1298,8 @@ export default function Dashboard({ onExit, onOpenGuardian, isOffline = false }:
                 else if (distanceMeters <= 4.2) distance = 'Medium';
 
                 let className = pred.class;
-                if (className === 'person' && registeredFaces.length > 0) {
-                  className = registeredFaces[0];
+                if (className.toLowerCase() === 'mother') {
+                  className = 'person';
                 }
 
                 return {
@@ -3789,7 +3800,7 @@ function SettingsView({ onBack, settings, setSettings, contacts, setContacts, re
               )}
             </div>
             <div className="flex gap-2">
-              <input type="text" placeholder="Face Label (e.g. Raj, Mother)" value={newFaceLabel}
+              <input type="text" placeholder="Face Label (e.g. Raj, Friend)" value={newFaceLabel}
                 onChange={(e) => setNewFaceLabel(e.target.value)}
                 className="flex-1 px-3 py-2 text-sm rounded-lg border border-slate-200 focus:border-primary-300 focus:outline-none" />
               <button onClick={addFace} className="px-4 py-2 text-sm rounded-lg bg-primary-600 text-white font-medium hover:bg-primary-700 transition-colors">Register</button>

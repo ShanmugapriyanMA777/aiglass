@@ -141,13 +141,15 @@ export async function analyzeFrame(
 
     const data = await response.json();
     return {
-      objects: (data.objects || []).map((o: RawObject) => ({
-        class: o.class,
-        confidence: o.confidence,
-        position: o.position || 'center',
-        distance: o.distance || 'Far',
-        distanceMeters: o.distanceMeters || 5,
-      })),
+      objects: (data.objects || [])
+        .filter((o: RawObject) => (o.class || '').toLowerCase() !== 'dog')
+        .map((o: RawObject) => ({
+          class: (o.class || '').toLowerCase() === 'mother' ? 'person' : o.class,
+          confidence: o.confidence,
+          position: o.position || 'center',
+          distance: o.distance || 'Far',
+          distanceMeters: o.distanceMeters || 5,
+        })),
       scene: data.scene || '',
       text: data.text || '',
       colors: data.colors || [],
@@ -178,6 +180,9 @@ export function isHarmfulObject(label: string): boolean {
 }
 
 export function generateVoiceMessage(obj: DetectedObject, lang?: string): string {
+  if ((obj.class || '').toLowerCase() === 'dog') {
+    return '';
+  }
   const shortLang = lang ? lang.split('-')[0].toLowerCase() : 'en';
   const isHarm = isHarmfulObject(obj.class);
 
@@ -288,6 +293,11 @@ export function drawBoundingBoxes(
   };
 
   predictions.forEach((pred) => {
+    if (!pred || !pred.class) return;
+    const lowerClass = (pred.class || '').toLowerCase();
+    if (lowerClass === 'dog') return; // Exclude dog
+    if (lowerClass === 'mother') pred.class = 'person';
+
     const score = pred.score !== undefined ? pred.score : (pred.confidence !== undefined ? pred.confidence : 1.0);
     if (score < confidenceThreshold) return;
 

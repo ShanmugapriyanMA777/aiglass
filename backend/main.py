@@ -155,7 +155,8 @@ async def generate_scene_description(frame_base64, objects, lang="en-US"):
     # 1. Primary: Groq LLM fast scene narration based on detected objects and visual context
     if GROQ_API_KEY:
         try:
-            objs_str = ", ".join(objects) if objects else "open space, clear pathway"
+            clean_objects = [o for o in objects if o.lower() not in ["dog", "mother"]]
+            objs_str = ", ".join(clean_objects) if clean_objects else "open space, clear pathway"
             lang_rule = " Respond in Tamil script." if is_tamil else (" Respond in Hindi script." if is_hindi else "")
             system_msg = (
                 "You are VisionAssist smart glasses companion. Describe what is around the visually impaired user based on the detected objects and surroundings. "
@@ -556,7 +557,7 @@ def run_yolo(frame):
         # Street / outdoor objects
         "person", "car", "bus", "truck", "motorcycle", "bicycle",
         "traffic light", "stop sign", "fire hydrant", "parking meter",
-        "bench", "dog", "cat", "backpack", "umbrella", "handbag", "suitcase",
+        "bench", "cat", "backpack", "umbrella", "handbag", "suitcase",
         # Common indoor objects
         "chair", "table", "couch", "bed", "laptop", "cell phone", "bottle", "cup", "book"
     ]
@@ -570,7 +571,7 @@ def run_yolo(frame):
                     continue
                 c = int(box.cls)
                 label = yolo_model.names[c]
-                if label in allowed:
+                if label in allowed and label.lower() != "dog":
                     coords = box.xyxy[0].tolist()
                     boxes_out.append({
                         "class": label,
@@ -589,7 +590,7 @@ def run_yolo(frame):
 # Harmful & Dangerous Objects
 DANGER_HARM = ["knife", "scissors", "blade", "sharp object", "weapon", "gun", "dagger", "sword", "broken glass", "fire", "razor"]
 DANGER_HIGH = ["car", "bus", "truck", "motorcycle"] + DANGER_HARM  # Vehicles & Weapons
-DANGER_MEDIUM = ["bicycle", "fire hydrant", "pole", "parking meter", "stop sign", "dog", "projector", "board", "whiteboard", "blackboard", "screen"]  # Obstacles & Tech
+DANGER_MEDIUM = ["bicycle", "fire hydrant", "pole", "parking meter", "stop sign", "projector", "board", "whiteboard", "blackboard", "screen"]  # Obstacles & Tech
 DANGER_LOW = ["person", "bench", "cell phone", "phone", "cat", "umbrella", "backpack", "handbag", "suitcase", "chair", "table", "laptop"]  # General awareness
 
 # Cooldown tracker: object_key -> last_announced_time
@@ -633,9 +634,11 @@ def get_danger_level(obj_class):
 
 def build_street_object_announcement(obj_class, position, distance_label, distance_meters, lang="en-US"):
     """Build a natural, conversational announcement for objects, with urgent harm alerts."""
+    o_clean = (obj_class or '').lower()
+    if o_clean == "dog":
+        return ""
     is_tamil = lang and lang.lower().startswith("ta")
     is_hindi = lang and lang.lower().startswith("hi")
-    o_clean = (obj_class or '').lower()
 
     if is_tamil:
         obj_names_ta = {
@@ -704,8 +707,8 @@ def process_street_objects(yolo_boxes, frame_width=640, frame_height=480, lang="
     global street_object_cache
     now = time.time()
 
-    # Exclude traffic light from street objects (handled separately)
-    street_relevant = [b for b in yolo_boxes if b['class'] != 'traffic light']
+    # Exclude traffic light and dog from street objects (handled separately)
+    street_relevant = [b for b in yolo_boxes if b['class'] != 'traffic light' and b['class'].lower() != 'dog']
 
     street_objects = []
     for box in street_relevant:
