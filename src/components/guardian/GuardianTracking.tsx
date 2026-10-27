@@ -21,6 +21,58 @@ export default function GuardianTracking({ liveState }: GuardianTrackingProps) {
   return (
     <div className="space-y-6">
       
+      {/* Active Navigation / Emergency Hospital Live Banner */}
+      {liveState.navigation.active && (
+        <div className={`rounded-2xl p-5 border shadow-sm flex flex-wrap items-center justify-between gap-4 ${
+          liveState.device.safetyStatus === 'CRITICAL'
+            ? 'bg-gradient-to-r from-red-500/10 via-red-500/5 to-white border-red-300 ring-2 ring-red-500/20'
+            : 'bg-gradient-to-r from-primary-500/10 to-white border-primary-200'
+        }`}>
+          <div className="flex items-center gap-3.5">
+            <div className={`w-11 h-11 rounded-xl flex items-center justify-center font-bold text-lg shadow-sm ${
+              liveState.device.safetyStatus === 'CRITICAL'
+                ? 'bg-red-600 text-white animate-bounce'
+                : 'bg-primary-600 text-white'
+            }`}>
+              {liveState.device.safetyStatus === 'CRITICAL' ? '🚑' : '🧭'}
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className={`text-[11px] font-black uppercase tracking-wider px-2 py-0.5 rounded ${
+                  liveState.device.safetyStatus === 'CRITICAL'
+                    ? 'bg-red-600 text-white'
+                    : 'bg-primary-100 text-primary-700'
+                }`}>
+                  {liveState.device.safetyStatus === 'CRITICAL' ? 'EMERGENCY HOSPITAL ROUTE ACTIVE' : 'ACTIVE ROUTE'}
+                </span>
+                <span className="text-xs font-bold text-slate-500">
+                  ETA: <span className="text-slate-900 font-extrabold">{liveState.navigation.etaMinutes} mins</span> • Distance: <span className="text-slate-900 font-extrabold">{liveState.navigation.distanceRemaining}</span>
+                </span>
+              </div>
+              <div className="text-base font-extrabold text-slate-900 mt-1">
+                Destination: {liveState.navigation.destination}
+              </div>
+              {liveState.navigation.currentStep && (
+                <div className="text-xs text-slate-600 mt-0.5 font-medium">
+                  Next Step: {liveState.navigation.currentStep}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2.5">
+            <a
+              href={`https://www.google.com/maps/dir/?api=1&origin=${lat},${lng}&destination=${encodeURIComponent(liveState.navigation.destination)}&travelmode=walking`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-extrabold rounded-xl transition-all shadow-sm flex items-center gap-1.5"
+            >
+              <ExternalLink className="w-3.5 h-3.5" /> Track Route in Google Maps
+            </a>
+          </div>
+        </div>
+      )}
+
       {/* Map Control Bar */}
       <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-200/80 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">

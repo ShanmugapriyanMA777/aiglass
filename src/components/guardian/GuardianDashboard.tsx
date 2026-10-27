@@ -34,6 +34,58 @@ export default function GuardianDashboard({ liveState, onNavigateTab, onTriggerS
   return (
     <div className="space-y-6">
       
+      {/* Emergency Hospital Urgent Header Banner */}
+      {(isCritical || (navigation.active && navigation.destination.toLowerCase().includes('hospital'))) && (
+        <div className="bg-gradient-to-r from-red-600 via-rose-600 to-red-700 text-white rounded-3xl p-6 shadow-xl border border-red-400/40 flex flex-wrap items-center justify-between gap-5">
+          <div className="flex items-center gap-4">
+            <div className="w-14 h-14 rounded-2xl bg-white/20 backdrop-blur-md flex items-center justify-center text-3xl shadow-inner">
+              🚑
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-0.5 rounded-full bg-white text-red-700 text-[11px] font-black tracking-wider uppercase">
+                  CRITICAL EMERGENCY HOSPITAL ROUTE
+                </span>
+                <span className="text-xs text-white/90 font-medium">
+                  Live GPS Synced from Glasses
+                </span>
+              </div>
+              <h2 className="text-xl font-black mt-1">
+                Routing User to: {navigation.destination || 'Nearest Emergency Care'}
+              </h2>
+              <div className="text-sm text-white/90 mt-0.5 flex flex-wrap items-center gap-3">
+                <span>Distance: <strong>{navigation.distanceRemaining || 'Calculating...'}</strong></span>
+                <span>•</span>
+                <span>Estimated Arrival: <strong>{navigation.etaMinutes} mins</strong></span>
+                {navigation.currentStep && (
+                  <>
+                    <span>•</span>
+                    <span>Step: <em>{navigation.currentStep}</em></span>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => onNavigateTab('tracking')}
+              className="px-5 py-2.5 bg-white text-red-700 hover:bg-slate-100 text-xs font-black rounded-xl transition-all shadow-md flex items-center gap-2"
+            >
+              <Navigation className="w-4 h-4" /> View Live Map
+            </button>
+            <a
+              href={`https://www.google.com/maps/dir/?api=1&origin=${location.latitude},${location.longitude}&destination=${encodeURIComponent(navigation.destination)}&travelmode=walking`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-5 py-2.5 bg-black/30 hover:bg-black/40 text-white text-xs font-black rounded-xl transition-all backdrop-blur-md border border-white/20 flex items-center gap-2"
+            >
+              <ArrowUpRight className="w-4 h-4" /> Google Maps
+            </a>
+          </div>
+        </div>
+      )}
+
       {/* Top Banner Status Overview */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         

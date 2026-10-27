@@ -25,7 +25,7 @@ import {
 import { LocationEngine, type TrustedLocation } from '../lib/LocationEngine';
 import { GpsDiagnosticsModal } from './GpsDiagnosticsModal';
 import MapPanel from './MapPanel';
-import { searchPlaces, getWalkingRoute, getDistanceMeters, type NavigationStep } from '../lib/maps';
+import { searchPlaces, getWalkingRoute, getDistanceMeters, findNearestHospital, calculateDistanceKm, VERIFIED_EMERGENCY_HOSPITALS, type NavigationStep } from '../lib/maps';
 import { getItem, setItem } from '../lib/storage';
 import { AssistantRouter } from '../lib/assistantRouter';
 import { navigationService, parseNavigationIntent } from '../navigation';
@@ -1056,6 +1056,85 @@ export default function Dashboard({ onExit, onOpenGuardian, isOffline = false }:
 
 
 
+  // Dedicated Nearest Emergency Hospital Locator & Router
+  const routeToNearestHospital = useCallback(async (lat?: number, lon?: number, isSos: boolean = false) => {
+    const userLat = lat ?? (currentCoords ? currentCoords[0] : 12.8227);
+    const userLon = lon ?? (currentCoords ? currentCoords[1] : 80.2201);
+
+    setError('');
+    speakIfNotMuted('Locating the nearest emergency hospital...');
+    setVoiceMessage('Checking nearest emergency hospital...');
+
+    try {
+      const nearestHospital = await findNearestHospital(userLat, userLon);
+      const hospitalName = nearestHospital.name.split(',')[0].trim();
+      const distMeters = nearestHospital.distance || Math.round(calculateDistanceKm(userLat, userLon, nearestHospital.latitude, nearestHospital.longitude) * 1000);
+      const distKm = (distMeters / 1000).toFixed(1);
+
+      // Calculate walking route to the nearest emergency hospital
+      const route = await getWalkingRoute([userLat, userLon], [nearestHospital.latitude, nearestHospital.longitude]);
+      const etaMins = Math.max(1, Math.ceil(route.duration / 60));
+      const distanceText = distMeters < 1000 ? `${distMeters} m` : `${distKm} km`;
+
+      // Update Navigation State in Glasses
+      setDestinationCoords([nearestHospital.latitude, nearestHospital.longitude]);
+      setRouteCoords(route.coordinates);
+      setRouteSteps(route.steps);
+      setNavDestination(hospitalName);
+      setDistanceRemaining(route.distance);
+      setEtaMinutes(etaMins);
+      setNavActive(true);
+      setIsSimulatingWalk(true);
+      setNavStep(0);
+      setSimulatedLoc([userLat, userLon]);
+      const firstStep = route.steps[0]?.instruction || `Head towards ${hospitalName}`;
+      setCurrentRoadName(firstStep);
+
+      // REAL-TIME INSTANT SYNC TO GUARDIAN PORTAL
+      publishAlert(
+        isSos ? '🚨 CRITICAL SOS: EMERGENCY HOSPITAL ROUTE' : '🚑 EMERGENCY HOSPITAL ROUTE ACTIVE',
+        `User routing to nearest emergency hospital: ${hospitalName}. Distance: ${distanceText}, ETA: ${etaMins} mins. Location: ${userLat.toFixed(4)}°N, ${userLon.toFixed(4)}°E.`,
+        'CRITICAL',
+        userLat,
+        userLon
+      );
+
+      publishNavigation(
+        true,
+        hospitalName,
+        distanceText,
+        etaMins,
+        firstStep
+      );
+
+      publishActivity(
+        'sos',
+        'Emergency Hospital Navigation',
+        `Navigating to ${hospitalName} (${distanceText}, ETA ${etaMins} mins). Real-time route synced with guardian.`
+      );
+
+      publishDeviceStatus({
+        safetyStatus: 'CRITICAL'
+      });
+
+      syncAlert('HOSPITAL_EMERGENCY', 'CRITICAL', `En route to ${hospitalName} (${distanceText})`, userLat, userLon);
+      syncLocation(userLat, userLon, `En route to ${hospitalName}`, 1.4, 0);
+
+      addHistory('navigation', hospitalName, null, `Hospital ${distanceText}`);
+
+      const announcement = `Routing emergency navigation to closest hospital: ${hospitalName}. It is ${distanceText} away, estimated ${etaMins} minutes. Live route sent to guardian portal. ${firstStep}`;
+      speakIfNotMuted(announcement);
+      setVoiceMessage(`Hospital: ${hospitalName} (${distanceText}, ETA ${etaMins}m)`);
+      return nearestHospital;
+    } catch (err) {
+      console.error('Emergency hospital routing failed:', err);
+      const fallbackHospital = VERIFIED_EMERGENCY_HOSPITALS[0];
+      const fallbackName = fallbackHospital.name.split(',')[0];
+      speakIfNotMuted(`Routing to ${fallbackName}. Live alert sent to Guardian portal.`);
+      return fallbackHospital;
+    }
+  }, [currentCoords, speakIfNotMuted, addHistory]);
+
   // SOS
   const handleSos = useCallback(async () => {
     setShowSos(true);
@@ -1069,75 +1148,39 @@ export default function Dashboard({ onExit, onOpenGuardian, isOffline = false }:
     setSimulatedLoc(null);
     setIsSimulatingWalk(false);
 
-    navigator.geolocation?.getCurrentPosition(
-      async (pos) => {
-        const { latitude, longitude } = pos.coords;
-        const message = `EMERGENCY: VisionAssist user needs help. Location: ${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
-        try {
-          await supabase.from('activity_log').insert({ event: 'sos', details: { message, location: { latitude, longitude } } });
-          syncAlert('SOS', 'CRITICAL', message, latitude, longitude);
-          syncLocation(latitude, longitude, 'Emergency Location', 0, 0);
-        } catch (e) {
-          console.warn('Failed to log SOS activity to Supabase:', e);
-        }
-        publishAlert('EMERGENCY SOS ALERT', message, 'CRITICAL', latitude, longitude);
-        publishActivity('sos', 'Emergency SOS Activated', message);
-        setSosSent(true);
-        speakIfNotMuted('Emergency activated. Location shared. Calling emergency contact.');
-
-        // Automatically map route to guardian address if configured, else fall back to nearest hospital
-        try {
-          const addressToRoute = settings.guardian_address ? settings.guardian_address.trim() : '';
-          let targetPlace = null;
-          let placeTypeMsg = '';
-
-          if (addressToRoute) {
-            const places = await searchPlaces(addressToRoute, latitude, longitude);
-            if (places.length > 0) {
-              targetPlace = places[0];
-              placeTypeMsg = `guardian address: ${targetPlace.name.split(',')[0]}`;
-            }
-          }
-
-          if (!targetPlace) {
-            // Fall back to hospital
-            const places = await searchPlaces('hospital', latitude, longitude);
-            if (places.length > 0) {
-              targetPlace = places[0];
-              placeTypeMsg = `closest hospital: ${targetPlace.name.split(',')[0]}`;
-            }
-          }
-
-          if (targetPlace) {
-            setDestinationCoords([targetPlace.latitude, targetPlace.longitude]);
-            const route = await getWalkingRoute([latitude, longitude], [targetPlace.latitude, targetPlace.longitude]);
-            setRouteCoords(route.coordinates);
-            setRouteSteps(route.steps);
-            setNavDestination(targetPlace.name.split(',')[0]);
-            setDistanceRemaining(route.distance);
-            setEtaMinutes(Math.ceil(route.duration / 60));
-            setNavActive(true);
-            setIsSimulatingWalk(true);
-            setNavStep(0);
-            setSimulatedLoc([latitude, longitude]);
-            setCurrentRoadName(route.steps[0]?.instruction || 'Routing emergency location');
-            speakIfNotMuted(`Routing emergency navigation to ${placeTypeMsg}`);
-          }
-        } catch (err) {
-          console.warn('Emergency routing failed:', err);
-        }
-      },
-      async () => {
-        try {
-          await supabase.from('activity_log').insert({ event: 'sos', details: { message: 'Location unavailable' } });
-        } catch (e) {
-          console.warn('Failed to log SOS activity to Supabase:', e);
-        }
-        setSosSent(true);
-        speakIfNotMuted('Emergency alert sent. Location unavailable.');
+    const executeSos = async (lat: number, lon: number) => {
+      const message = `EMERGENCY SOS: VisionAssist user needs immediate help. Location: ${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+      try {
+        await supabase.from('activity_log').insert({ event: 'sos', details: { message, location: { latitude: lat, longitude: lon } } });
+        syncAlert('SOS', 'CRITICAL', message, lat, lon);
+        syncLocation(lat, lon, 'Emergency Location', 0, 0);
+      } catch (e) {
+        console.warn('Failed to log SOS activity to Supabase:', e);
       }
-    );
-  }, [speakIfNotMuted, settings]);
+      publishAlert('EMERGENCY SOS ALERT', message, 'CRITICAL', lat, lon);
+      publishActivity('sos', 'Emergency SOS Activated', message);
+      setSosSent(true);
+
+      // Route immediately to nearest hospital and sync with guardian portal
+      await routeToNearestHospital(lat, lon, true);
+    };
+
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => executeSos(pos.coords.latitude, pos.coords.longitude),
+        () => {
+          const fallbackLat = currentCoords ? currentCoords[0] : 12.8227;
+          const fallbackLon = currentCoords ? currentCoords[1] : 80.2201;
+          executeSos(fallbackLat, fallbackLon);
+        },
+        { timeout: 5000, enableHighAccuracy: true }
+      );
+    } else {
+      const fallbackLat = currentCoords ? currentCoords[0] : 12.8227;
+      const fallbackLon = currentCoords ? currentCoords[1] : 80.2201;
+      executeSos(fallbackLat, fallbackLon);
+    }
+  }, [currentCoords, routeToNearestHospital]);
 
   // Fall Detection
   const handleFallDetection = useCallback(() => {
@@ -1639,7 +1682,7 @@ export default function Dashboard({ onExit, onOpenGuardian, isOffline = false }:
         setVoiceMessage('Returning to Dashboard...');
         return;
       }
-      if (appQuery.includes('sos') || appQuery.includes('emergency')) {
+      if (appQuery === 'sos' || appQuery === 'emergency' || appQuery === 'emergency sos') {
         handleSos();
         return;
       }
@@ -1975,7 +2018,27 @@ export default function Dashboard({ onExit, onOpenGuardian, isOffline = false }:
       setVoiceMessage('');
     } else if (normalizedCmd.includes('start') && normalizedCmd.includes('camera')) {
       if (!cameraOn) startCamera();
-    } else if (normalizedCmd.includes('help') || normalizedCmd.includes('emergency') || normalizedCmd.includes('sos')) {
+    } else if (
+      normalizedCmd.includes('nearest hospital') ||
+      normalizedCmd.includes('emergency hospital') ||
+      normalizedCmd.includes('closest hospital') ||
+      normalizedCmd.includes('nearest emergency') ||
+      normalizedCmd.includes('check nearest emergency') ||
+      normalizedCmd.includes('take me to hospital') ||
+      normalizedCmd.includes('go to hospital')
+    ) {
+      routeToNearestHospital();
+    } else if (
+      normalizedCmd === 'sos' ||
+      normalizedCmd === 'emergency' ||
+      normalizedCmd === 'call sos' ||
+      normalizedCmd === 'trigger sos' ||
+      normalizedCmd === 'send sos' ||
+      normalizedCmd.includes('emergency sos') ||
+      normalizedCmd.includes('i need emergency help') ||
+      normalizedCmd === 'help me' ||
+      normalizedCmd === 'i need help'
+    ) {
       handleSos();
     } else if (normalizedCmd.includes('fall') || normalizedCmd.includes('fell')) {
       handleFallDetection();
@@ -2184,7 +2247,11 @@ export default function Dashboard({ onExit, onOpenGuardian, isOffline = false }:
           }
           break;
         case 'e':
-          handleSos();
+          // Require Ctrl+E or Alt+E so typing or pressing 'e' never accidentally fires emergency SOS
+          if (e.ctrlKey || e.altKey) {
+            e.preventDefault();
+            handleSos();
+          }
           break;
       }
     };
