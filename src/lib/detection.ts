@@ -1,4 +1,3 @@
-import { translateText } from './speech';
 
 let cachedCocoModel: any = null;
 let modelLoadingPromise: Promise<any> | null = null;
@@ -510,5 +509,5 @@ export async function askGemini(
     }
   }
 
-  return `I heard your question: "${question}". I'm currently unable to connect to the AI service. Please check your internet connection and make sure your API key is configured.`;
+  return `I heard your question: "${question}". I'm currently unable to connect to the AI service. Please check your internet connection and server status.`;
 }

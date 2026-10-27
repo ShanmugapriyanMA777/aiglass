@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Daily Activity Reports - VisionAssist Guardian Portal</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/dashboard.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/responsive.css">
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/supabase.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/reports.js"></script>
+</head>
+<body id="reports-page">
+
+  <div class="app-layout">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-title">Guardian Portal</div>
+      </div>
+      <nav class="sidebar-nav">
+        <a href="dashboard.html" class="nav-item">Dashboard</a>
+        <a href="tracking.html" class="nav-item">Live GPS Tracking</a>
+        <a href="alerts.html" class="nav-item">Safety & SOS Alerts</a>
+        <a href="activity.html" class="nav-item">AI Activity & OCR</a>
+        <a href="reports.html" class="nav-item active">Daily Reports</a>
+        <a href="settings.html" class="nav-item">Settings</a>
+      </nav>
+      <div class="sidebar-footer">
+        <button id="logout-btn" class="btn" style="width:100%; color:white; border: 1px solid rgba(255,255,255,0.3); background: transparent;">Sign Out</button>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="top-header">
+        <h2>Daily Activity Reports & CSV Exporter</h2>
+        <div style="display: flex; gap: 10px;">
+          <button id="export-csv-btn" class="btn btn-primary">📥 Export CSV Report</button>
+          <button id="print-report-btn" class="btn btn-outline">🖨️ Print Report</button>
+        </div>
+      </header>
+
+      <div class="container">
+        <div class="card col-12">
+          <div class="card-header">
+            <div>
+              <span class="card-title">VisionAssist Guardian Daily Report</span>
+              <div style="font-size: 12px; color: var(--slate-500); margin-top: 2px;" id="report-date-display">Today</div>
+            </div>
+            <span class="status-pill safe">SUMMARY GENERATED</span>
+          </div>
+
+          <!-- AI Daily Summary Text Box -->
+          <div style="background: var(--primary-50); border: 1px solid var(--primary-100); border-radius: var(--radius-md); padding: 18px; margin-top: 12px;">
+            <h4 style="font-size: 13px; font-weight: 800; color: var(--primary-800); text-transform: uppercase;">AI-Generated Executive Daily Summary</h4>
+            <p id="ai-generated-summary-text" style="font-size: 14px; color: var(--slate-700); margin-top: 6px; leading-height: 1.6;">
+              Today the user completed four navigation sessions and traveled approximately 5.8 kilometers. Three safety warnings were generated, mainly due to nearby vehicles and obstacles during crosswalk navigation. No emergency SOS events occurred, and device connectivity remained stable at 98% uptime.
+            </p>
+          </div>
+
+          <!-- Master Metrics Grid -->
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 20px;">
+            <div style="background: var(--slate-50); padding: 16px; border-radius: var(--radius-md); border: 1px solid var(--slate-200);">
+              <div class="stat-label">Total Active Time</div>
+              <div class="stat-number" id="report-active-time">6h 24m</div>
+            </div>
+            <div style="background: var(--slate-50); padding: 16px; border-radius: var(--radius-md); border: 1px solid var(--slate-200);">
+              <div class="stat-label">Distance Travelled</div>
+              <div class="stat-number" id="report-distance">5.8 km</div>
+            </div>
+            <div style="background: var(--slate-50); padding: 16px; border-radius: var(--radius-md); border: 1px solid var(--slate-200);">
+              <div class="stat-label">Navigation Trips</div>
+              <div class="stat-number" id="report-nav-count">4 sessions</div>
+            </div>
+            <div style="background: var(--slate-50); padding: 16px; border-radius: var(--radius-md); border: 1px solid var(--slate-200);">
+              <div class="stat-label">Objects Detected</div>
+              <div class="stat-number" id="report-objects-count">247 items</div>
+            </div>
+            <div style="background: var(--slate-50); padding: 16px; border-radius: var(--radius-md); border: 1px solid var(--slate-200);">
+              <div class="stat-label">Safety Alerts</div>
+              <div class="stat-number" id="report-alerts-count">3 warnings</div>
+            </div>
+            <div style="background: var(--slate-50); padding: 16px; border-radius: var(--radius-md); border: 1px solid var(--slate-200);">
+              <div class="stat-label">OCR Sign Reads</div>
+              <div class="stat-number" id="report-ocr-count">6 reads</div>
+            </div>
+            <div style="background: var(--slate-50); padding: 16px; border-radius: var(--radius-md); border: 1px solid var(--slate-200);">
+              <div class="stat-label">Currency Scans</div>
+              <div class="stat-number" id="report-currency-count">2 scans</div>
+            </div>
+            <div style="background: var(--slate-50); padding: 16px; border-radius: var(--radius-md); border: 1px solid var(--slate-200);">
+              <div class="stat-label">Emergency SOS Events</div>
+              <div class="stat-number" id="report-sos-count">0 events</div>
+            </div>
+            <div style="background: var(--slate-50); padding: 16px; border-radius: var(--radius-md); border: 1px solid var(--slate-200);">
+              <div class="stat-label">Average Battery & Uptime</div>
+              <div class="stat-number" id="report-battery-avg">68%</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+</body>
+</html>

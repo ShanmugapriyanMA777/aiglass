@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Safety & SOS Alerts - VisionAssist Guardian Portal</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/dashboard.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/responsive.css">
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/supabase.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/alerts.js"></script>
+  <script src="js/realtime.js"></script>
+</head>
+<body>
+
+  <!-- Emergency SOS Modal Alert Popup -->
+  <div class="sos-banner" id="sos-alert-modal" style="display: none;">
+    <div class="sos-modal">
+      <div class="sos-icon">🚨</div>
+      <div class="sos-title">EMERGENCY SOS ALERT</div>
+      <p style="font-size: 15px; color: var(--slate-600); margin-top: 8px;">
+        User <b id="sos-user-name">Rahul</b> triggered emergency mode!
+      </p>
+
+      <div style="background: var(--slate-50); border-radius: var(--radius-md); padding: 16px; margin-top: 16px; text-align: left; font-size: 13px;">
+        <div><b>Location:</b> <span id="sos-user-location">OMR Main Road, Chennai</span></div>
+        <div><b>Time:</b> <span id="sos-user-time">Just now</span></div>
+        <div><b>Message:</b> <span id="sos-user-msg">Emergency SOS Button Activated</span></div>
+      </div>
+
+      <div class="sos-actions">
+        <button id="sos-ack-btn" class="btn btn-outline" style="flex:1;">Acknowledge Alert</button>
+        <button id="sos-resolve-btn" class="btn btn-critical" style="flex:1;">Resolve Alert</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="app-layout">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-title">Guardian Portal</div>
+      </div>
+      <nav class="sidebar-nav">
+        <a href="dashboard.html" class="nav-item">Dashboard</a>
+        <a href="tracking.html" class="nav-item">Live GPS Tracking</a>
+        <a href="alerts.html" class="nav-item active">Safety & SOS Alerts</a>
+        <a href="activity.html" class="nav-item">AI Activity & OCR</a>
+        <a href="reports.html" class="nav-item">Daily Reports</a>
+        <a href="settings.html" class="nav-item">Settings</a>
+      </nav>
+      <div class="sidebar-footer">
+        <button id="logout-btn" class="btn" style="width:100%; color:white; border: 1px solid rgba(255,255,255,0.3); background: transparent;">Sign Out</button>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="top-header">
+        <h2>Safety Monitoring & Emergency SOS History</h2>
+        <button id="trigger-demo-sos-btn" class="btn btn-critical">🚨 Test SOS Alarm Trigger</button>
+      </header>
+
+      <div class="container">
+        <div class="card col-12">
+          <div class="card-header">
+            <span class="card-title">Recent Safety Alerts</span>
+            <span class="status-pill safe">3 Events Recorded Today</span>
+          </div>
+
+          <div style="display: flex; flex-direction: column; gap: 12px; margin-top: 12px;">
+            <div style="background: var(--critical-50); border: 1px solid var(--critical-100); border-radius: var(--radius-md); padding: 16px;">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span class="status-pill critical">🚨 CRITICAL · SOS</span>
+                <span style="font-size: 12px; color: var(--slate-500);">08:35 AM</span>
+              </div>
+              <div style="font-weight: 800; color: var(--critical-700); margin-top: 6px;">Emergency SOS Activated via Glasses Button</div>
+              <div style="font-size: 13px; color: var(--slate-600); margin-top: 2px;">User pressed and held the smart glasses emergency button. Acknowledged by Sarah.</div>
+            </div>
+
+            <div style="background: var(--warning-50); border: 1px solid var(--warning-100); border-radius: var(--radius-md); padding: 16px;">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span class="status-pill warning">⚠️ HIGH · VEHICLE HAZARD</span>
+                <span style="font-size: 12px; color: var(--slate-500);">10:32 AM</span>
+              </div>
+              <div style="font-weight: 800; color: var(--warning-600); margin-top: 6px;">Approaching Vehicle Warning</div>
+              <div style="font-size: 13px; color: var(--slate-600); margin-top: 2px;">Car detected on right at 2.4m distance while crossing OMR Road. Warning audio spoken.</div>
+            </div>
+
+            <div style="background: var(--slate-50); border: 1px solid var(--slate-200); border-radius: var(--radius-md); padding: 16px;">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span class="status-pill safe">🟢 MEDIUM · OBSTACLE</span>
+                <span style="font-size: 12px; color: var(--slate-500);">11:40 AM</span>
+              </div>
+              <div style="font-weight: 800; color: var(--slate-800); margin-top: 6px;">Construction Barrier Obstacle Detected</div>
+              <div style="font-size: 13px; color: var(--slate-600); margin-top: 2px;">Caution sign detected on left side of sidewalk. User guided to take left detour.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+</body>
+</html>

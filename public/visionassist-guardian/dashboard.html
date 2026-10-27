@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Guardian Dashboard - VisionAssist Guardian Portal</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/dashboard.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/responsive.css">
+  
+  <!-- Leaflet CSS & JS for Live Map -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Supabase CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/supabase.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/dashboard.js"></script>
+  <script src="js/tracking.js"></script>
+  <script src="js/alerts.js"></script>
+  <script src="js/realtime.js"></script>
+</head>
+<body id="dashboard-page">
+
+  <!-- Emergency SOS Modal Alert Popup -->
+  <div class="sos-banner" id="sos-alert-modal" style="display: none;">
+    <div class="sos-modal">
+      <div class="sos-icon">🚨</div>
+      <div class="sos-title">EMERGENCY SOS ALERT</div>
+      <p style="font-size: 15px; color: var(--slate-600); margin-top: 8px;">
+        User <b id="sos-user-name">Rahul</b> triggered emergency mode from smart glasses button!
+      </p>
+
+      <div style="background: var(--slate-50); border-radius: var(--radius-md); padding: 16px; margin-top: 16px; text-align: left; font-size: 13px; space-y: 6px;">
+        <div><b>Location:</b> <span id="sos-user-location">OMR Main Road, Chennai</span></div>
+        <div><b>Time:</b> <span id="sos-user-time">Just now</span></div>
+        <div><b>Message:</b> <span id="sos-user-msg">Emergency SOS Button Held</span></div>
+      </div>
+
+      <div class="sos-actions">
+        <button id="sos-ack-btn" class="btn btn-outline" style="flex:1;">Acknowledge Alert</button>
+        <button id="sos-resolve-btn" class="btn btn-critical" style="flex:1;">Resolve Alert</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="app-layout">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-title" style="display: flex; align-items: center; gap: 8px;">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          Guardian Portal
+        </div>
+      </div>
+      <nav class="sidebar-nav">
+        <a href="dashboard.html" class="nav-item active">Dashboard</a>
+        <a href="tracking.html" class="nav-item">Live GPS Tracking</a>
+        <a href="alerts.html" class="nav-item">Safety & SOS Alerts</a>
+        <a href="activity.html" class="nav-item">AI Activity & OCR</a>
+        <a href="reports.html" class="nav-item">Daily Reports</a>
+        <a href="settings.html" class="nav-item">Device Health & Settings</a>
+      </nav>
+      <div class="sidebar-footer">
+        <button id="logout-btn" class="btn" style="width:100%; color:white; border: 1px solid rgba(255,255,255,0.3); background: transparent;">Sign Out</button>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <header class="top-header">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <h2 style="font-size: 18px; font-weight: 800; color: var(--slate-900);">User Safety Guardian Overview</h2>
+          <span class="status-pill safe" id="status-safety">🟢 Safe</span>
+        </div>
+
+        <div class="header-actions">
+          <div class="guardian-user-meta">
+            <div class="avatar-circle">G</div>
+            <div style="text-align: left;">
+              <div style="font-size: 13px; font-weight: 700; color: var(--slate-800);" id="guardian-name-display">Dr. Sarah Connor</div>
+              <div style="font-size: 10px; color: var(--slate-500);">Authorized Guardian</div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div class="container">
+        <!-- Main Dashboard Cards Grid -->
+        <div class="dashboard-grid">
+          
+          <!-- Card 1: User Status & Device Connection -->
+          <div class="card col-4">
+            <div class="card-header">
+              <span class="card-title">User Status & Health</span>
+              <span class="status-pill safe" id="status-user-online">Online</span>
+            </div>
+            <div style="font-size: 18px; font-weight: 800; color: var(--slate-900);" id="user-display-name">Rahul (User)</div>
+            <div style="font-size: 12px; color: var(--slate-500); margin-top: 2px;">Last update: <span id="last-updated-time">Just now</span></div>
+
+            <div style="margin-top: 16px;">
+              <div style="display: flex; justify-content: space-between; font-size: 12px; font-weight: 700;">
+                <span>Smart Glasses Battery</span>
+                <span id="battery-level-text">78%</span>
+              </div>
+              <div class="battery-meter">
+                <div class="battery-fill" id="battery-fill" style="width: 78%;"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card 2: Current GPS Location -->
+          <div class="card col-4">
+            <div class="card-header">
+              <span class="card-title">Current Location</span>
+              <span style="font-size: 11px; font-weight: 700; color: var(--primary-600);" id="network-status-text">Online (4G)</span>
+            </div>
+            <div style="font-size: 14px; font-weight: 700; color: var(--slate-800);" id="location-address">Agni College Campus, OMR Road, Chennai</div>
+            <div style="font-size: 12px; color: var(--slate-500); font-family: monospace; margin-top: 4px;" id="location-coords">12.9716° N, 80.2454° E</div>
+            <a href="tracking.html" style="display: inline-block; margin-top: 12px; font-size: 12px; font-weight: 700;">View Live Tracking Map →</a>
+          </div>
+
+          <!-- Card 3: Active Navigation HUD -->
+          <div class="card col-4">
+            <div class="card-header">
+              <span class="card-title">Active Navigation</span>
+              <span style="font-size: 11px; font-weight: 700; color: var(--warning-600);" id="nav-status-badge">⚠️ DEVIATION</span>
+            </div>
+            <div class="hud-navigation" style="background: linear-gradient(135deg, #78350f, #451a03);">
+              <div class="hud-nav-title">DESTINATION</div>
+              <div class="hud-nav-dest" id="nav-destination">Home</div>
+              <div class="hud-nav-metrics">
+                <div>
+                  <div style="font-size: 10px; opacity: 0.8;">ROUTE STATUS</div>
+                  <div style="font-size: 13px; font-weight: 800; color: #f59e0b;" id="nav-route-status">⚠️ Route deviation detected</div>
+                </div>
+              </div>
+              <div class="hud-nav-metrics" style="margin-top:8px; padding-top:8px;">
+                <div>
+                  <div style="font-size: 10px; opacity: 0.8;">DISTANCE</div>
+                  <div style="font-size: 15px; font-weight: 800;" id="nav-distance">1.2 km</div>
+                </div>
+                <div>
+                  <div style="font-size: 10px; opacity: 0.8;">ETA</div>
+                  <div style="font-size: 15px; font-weight: 800;" id="nav-eta">15 mins</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card 4: Live Map Display -->
+          <div class="card col-8">
+            <div class="card-header">
+              <span class="card-title">Live Tracking Map</span>
+              <a href="tracking.html" style="font-size: 12px; font-weight: 700;">Full Map View</a>
+            </div>
+            <div id="map-element" class="map-container"></div>
+          </div>
+
+          <!-- Card 5: AI Engine & Hardware Status -->
+          <div class="card col-4">
+            <div class="card-header">
+              <span class="card-title">Device Health</span>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 10px; font-size: 13px;">
+              <div style="display: flex; justify-content: space-between;">
+                <span style="color: var(--slate-600);">Camera Status</span>
+                <span style="font-weight: 700; color: var(--success-600);" id="ai-camera-status">● Active</span>
+              </div>
+              <div style="display: flex; justify-content: space-between;">
+                <span style="color: var(--slate-600);">Microphone</span>
+                <span style="font-weight: 700; color: var(--success-600);" id="ai-mic-status">● Active</span>
+              </div>
+              <div style="display: flex; justify-content: space-between;">
+                <span style="color: var(--slate-600);">GPS Tracking</span>
+                <span style="font-weight: 700; color: var(--success-600);" id="ai-gps-status">● Active</span>
+              </div>
+              <div style="display: flex; justify-content: space-between;">
+                <span style="color: var(--slate-600);">AI Vision Engine</span>
+                <span style="font-weight: 700; color: var(--success-600);" id="ai-engine-status">● Active</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card: Intelligent Safety Alerts -->
+          <div class="card col-12">
+            <div class="card-header">
+              <span class="card-title">🚨 Intelligent Safety Alerts (Risk Categorized)</span>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 10px;">
+              <div style="background: var(--critical-50); border-left: 5px solid var(--critical-500); padding: 12px; border-radius: var(--radius-sm); display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                  <span style="font-weight: 800; color: var(--critical-700);">🚨 Vehicle approaching — High Risk</span>
+                  <div style="font-size: 12px; color: var(--slate-600);">Car detected on zebra crossing at 2.4m distance. Warning spoken immediately.</div>
+                </div>
+                <span style="font-size: 11px; font-weight: 700; color: var(--slate-505);">10:32 AM</span>
+              </div>
+              <div style="background: var(--warning-50); border-left: 5px solid var(--warning-500); padding: 12px; border-radius: var(--radius-sm); display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                  <span style="font-weight: 800; color: var(--warning-600);">⚠️ Stairs detected — Medium Risk</span>
+                  <div style="font-size: 12px; color: var(--slate-600);">Staircase entrance ahead. User advised to use handrails.</div>
+                </div>
+                <span style="font-size: 11px; font-weight: 700; color: var(--slate-505);">11:40 AM</span>
+              </div>
+              <div style="background: var(--primary-50); border-left: 5px solid var(--primary-500); padding: 12px; border-radius: var(--radius-sm); display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                  <span style="font-weight: 800; color: var(--primary-700);">ℹ️ Person detected — Informational</span>
+                  <div style="font-size: 12px; color: var(--slate-600);">Known face "Priya" detected nearby at 3.0m distance.</div>
+                </div>
+                <span style="font-size: 11px; font-weight: 700; color: var(--slate-505);">09:15 AM</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card: Smart Geofencing -->
+          <div class="card col-6">
+            <div class="card-header">
+              <span class="card-title">🏠 Smart Geofencing & Safe Zones</span>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 12px; font-size: 13px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--slate-200); padding-bottom:8px;">
+                <span>🏠 Home (Safe Zone)</span>
+                <span style="font-weight:700; color:var(--primary-600);">Radius: 100m</span>
+              </div>
+              <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--slate-200); padding-bottom:8px;">
+                <span>🎓 College (Safe Zone)</span>
+                <span style="font-weight:700; color:var(--warning-600);">Exited (Alert Triggered)</span>
+              </div>
+              <div style="display:flex; justify-content:space-between; align-items:center; padding-bottom:4px;">
+                <span>🏥 Hospital (Safe Zone)</span>
+                <span style="font-weight:700; color:var(--primary-600);">Radius: 100m</span>
+              </div>
+              <div style="background: var(--warning-50); border: 1px solid var(--warning-100); padding: 10px; border-radius: var(--radius-sm); font-size: 12px; font-weight: 700; color: var(--warning-600); text-align: center; margin-top: 6px;" id="geofence-alert-box">
+                ⚠️ Geofence: "User has left the College safe zone."
+              </div>
+            </div>
+          </div>
+
+          <!-- Card: AI Guardian Assistant Widget -->
+          <div class="card col-6">
+            <div class="card-header">
+              <span class="card-title">🤖 AI Guardian Assistant</span>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 10px; height: 130px; overflow-y: auto; border: 1px solid var(--slate-200); padding: 12px; border-radius: var(--radius-sm); font-size: 13px; background: var(--slate-50);" id="ai-chat-history">
+              <div style="margin-bottom: 8px;">
+                <span style="font-weight: 800; color: var(--primary-700);">AI Guardian:</span>
+                <span style="color: var(--slate-600);">Welcome Sarah. Ask me anything about the user's live status, reports, or device health.</span>
+              </div>
+            </div>
+            <div style="display: flex; gap: 8px; margin-top: 10px;">
+              <input type="text" id="ai-chat-input" placeholder="e.g. Where is the user? or Any problems today?" style="flex: 1; padding: 10px; border-radius: var(--radius-md); border: 1px solid var(--slate-300); font-size: 13px;">
+              <button id="ai-chat-send-btn" class="btn btn-primary" style="padding: 10px 16px;">Ask</button>
+            </div>
+          </div>
+
+          <!-- Card: Daily Safety Report -->
+          <div class="card col-12">
+            <div class="card-header">
+              <span class="card-title">📊 VisionAssist Daily Safety Summary</span>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; text-align: center;">
+              <div style="background: var(--slate-50); padding: 12px; border-radius: var(--radius-md);">
+                <div class="stat-number" style="font-size:22px;">5.8 km</div>
+                <div class="stat-label" style="font-size:10px;">Distance</div>
+              </div>
+              <div style="background: var(--slate-50); padding: 12px; border-radius: var(--radius-md);">
+                <div class="stat-number" style="font-size:22px;">4</div>
+                <div class="stat-label" style="font-size:10px;">Navigation trips</div>
+              </div>
+              <div style="background: var(--slate-50); padding: 12px; border-radius: var(--radius-md);">
+                <div class="stat-number" style="font-size:22px;">3</div>
+                <div class="stat-label" style="font-size:10px;">Safety alerts</div>
+              </div>
+              <div style="background: var(--slate-50); padding: 12px; border-radius: var(--radius-md);">
+                <div class="stat-number" style="font-size:22px;">0</div>
+                <div class="stat-label" style="font-size:10px;">Critical alerts</div>
+              </div>
+              <div style="background: var(--slate-50); padding: 12px; border-radius: var(--radius-md);">
+                <div class="stat-number" style="font-size:22px;">247</div>
+                <div class="stat-label" style="font-size:10px;">Object detections</div>
+              </div>
+              <div style="background: var(--slate-50); padding: 12px; border-radius: var(--radius-md);">
+                <div class="stat-number" style="font-size:22px;">6</div>
+                <div class="stat-label" style="font-size:10px;">OCR sessions</div>
+              </div>
+              <div style="background: var(--slate-50); padding: 12px; border-radius: var(--radius-md);">
+                <div class="stat-number" style="font-size:22px;">2</div>
+                <div class="stat-label" style="font-size:10px;">Currency scans</div>
+              </div>
+              <div style="background: var(--slate-50); padding: 12px; border-radius: var(--radius-md);">
+                <div class="stat-number" style="font-size:22px;">7h 12m</div>
+                <div class="stat-label" style="font-size:10px;">Device uptime</div>
+              </div>
+            </div>
+            <div style="background: var(--primary-50); border: 1px solid var(--primary-100); padding: 14px; border-radius: var(--radius-md); margin-top: 14px; font-size: 13px; color: var(--primary-900); font-weight: 600;">
+              💡 <b>Safety Summary:</b> "Overall, the user completed their planned trips safely. Three minor safety alerts occurred, with no emergency events."
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Chat Script Hook -->
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const sendBtn = document.getElementById('ai-chat-send-btn');
+      const chatInput = document.getElementById('ai-chat-input');
+      const chatHistory = document.getElementById('ai-chat-history');
+
+      if (sendBtn && chatInput && chatHistory) {
+        sendBtn.addEventListener('click', () => {
+          const query = chatInput.value.trim();
+          if (!query) return;
+
+          // Render User Msg
+          const userDiv = document.createElement('div');
+          userDiv.style.marginBottom = '8px';
+          userDiv.innerHTML = `<span style="font-weight:800; color:var(--slate-800);">Guardian:</span> <span style="color:var(--slate-700);">${query}</span>`;
+          chatHistory.appendChild(userDiv);
+          chatInput.value = '';
+
+          // Scroll
+          chatHistory.scrollTop = chatHistory.scrollHeight;
+
+          // Render AI Answer
+          setTimeout(() => {
+            let reply = "I can help with location, reports, and alerts. Ask me 'Where is the user?' or 'Any problems today?'";
+            const qLower = query.toLowerCase();
+
+            if (qLower.includes('where')) {
+              reply = "The user is currently near Sholinganallur. They are walking toward their saved destination. GPS accuracy is approximately 8 meters.";
+            } else if (qLower.includes('problem') || qLower.includes('alerts') || qLower.includes('issue')) {
+              reply = "There were two vehicle-related safety alerts. No SOS events occurred.";
+            } else if (qLower.includes('battery') || qLower.includes('status')) {
+              reply = "Smart glasses battery is at 78%. Camera, GPS, and AI subsystems are fully active.";
+            }
+
+            const aiDiv = document.createElement('div');
+            aiDiv.style.marginBottom = '8px';
+            aiDiv.innerHTML = `<span style="font-weight:800; color:var(--primary-700);">AI Guardian:</span> <span style="color:var(--slate-600);">${reply}</span>`;
+            chatHistory.appendChild(aiDiv);
+            chatHistory.scrollTop = chatHistory.scrollHeight;
+          }, 800);
+        });
+
+        // Trigger on Enter
+        chatInput.addEventListener('keypress', (e) => {
+          if (e.key === 'Enter') sendBtn.click();
+        });
+      }
+    });
+  </script>
+</body>
+</html>

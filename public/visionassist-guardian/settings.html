@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Device Health & Privacy Settings - VisionAssist Guardian Portal</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/dashboard.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/responsive.css">
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/supabase.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/settings.js"></script>
+</head>
+<body>
+
+  <div class="app-layout">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-title">Guardian Portal</div>
+      </div>
+      <nav class="sidebar-nav">
+        <a href="dashboard.html" class="nav-item">Dashboard</a>
+        <a href="tracking.html" class="nav-item">Live GPS Tracking</a>
+        <a href="alerts.html" class="nav-item">Safety & SOS Alerts</a>
+        <a href="activity.html" class="nav-item">AI Activity & OCR</a>
+        <a href="reports.html" class="nav-item">Daily Reports</a>
+        <a href="settings.html" class="nav-item active">Settings</a>
+      </nav>
+      <div class="sidebar-footer">
+        <button id="logout-btn" class="btn" style="width:100%; color:white; border: 1px solid rgba(255,255,255,0.3); background: transparent;">Sign Out</button>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="top-header">
+        <h2>Device Health & Privacy Controls</h2>
+      </header>
+
+      <div class="container" style="display: flex; flex-direction: column; gap: 20px;">
+        
+        <!-- Section 1: Privacy Controls -->
+        <div class="card col-12">
+          <div class="card-header">
+            <span class="card-title">User Sharing Privacy Controls</span>
+            <span class="status-pill safe">PRIVACY SAFE</span>
+          </div>
+          <p style="font-size: 13px; color: var(--slate-600); margin-bottom: 16px;">
+            Control which categories of activity information are visible to authorized guardians. Emergency SOS sharing is mandatory for user safety.
+          </p>
+
+          <div style="display: flex; flex-direction: column; gap: 12px; font-size: 14px;">
+            <label style="display: flex; align-items: center; gap: 10px;">
+              <input type="checkbox" id="share-location" checked style="width: 18px; height: 18px;">
+              <span>Share Live Location & GPS Tracking</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 10px;">
+              <input type="checkbox" id="share-objects" checked style="width: 18px; height: 18px;">
+              <span>Share Object Detection Hazard Alerts (Vehicles, Obstacles)</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 10px;">
+              <input type="checkbox" id="share-navigation" checked style="width: 18px; height: 18px;">
+              <span>Share Active Navigation Destination & Trip History</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 10px;">
+              <input type="checkbox" id="share-ocr" checked style="width: 18px; height: 18px;">
+              <span>Share OCR Text Reading Summaries</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 10px;">
+              <input type="checkbox" id="share-currency" checked style="width: 18px; height: 18px;">
+              <span>Share Currency Recognition Logs</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 10px;">
+              <input type="checkbox" id="share-ai" checked style="width: 18px; height: 18px;">
+              <span>Share Conversational AI Activity Summaries</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Section 3: Detailed Device Hardware Status -->
+        <div class="card col-12">
+          <div class="card-header">
+            <span class="card-title">Hardware Device Health Diagnostics</span>
+          </div>
+
+          <div style="display: flex; flex-direction: column; gap: 12px; font-size: 14px;">
+            <div style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--slate-100); padding-bottom: 8px;">
+              <span style="color: var(--slate-600);">Camera Hardware</span>
+              <span style="font-weight: 700;" id="setting-camera-status">Active (1080p @ 30 FPS)</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--slate-100); padding-bottom: 8px;">
+              <span style="color: var(--slate-600);">Microphone Array</span>
+              <span style="font-weight: 700;" id="setting-mic-status">Active (Noise Cancelling)</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--slate-100); padding-bottom: 8px;">
+              <span style="color: var(--slate-600);">GPS Module</span>
+              <span style="font-weight: 700;" id="setting-gps-status">Active (High Accuracy)</span>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+              <span style="color: var(--slate-600);">AI Neural Subsystems</span>
+              <span style="font-weight: 700;" id="setting-ai-status">Active (Neural Vision + PyTorch Currency + YOLOv8)</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </main>
+  </div>
+
+</body>
+</html>

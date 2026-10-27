@@ -1,7 +1,13 @@
 import { useState } from 'react';
 import { Settings, Shield, CheckCircle2 } from 'lucide-react';
 
-export default function GuardianSettings() {
+import type { GuardianLiveState } from '../../lib/guardianRealtimeSync';
+
+interface GuardianSettingsProps {
+  liveState?: GuardianLiveState;
+}
+
+export default function GuardianSettings({ liveState }: GuardianSettingsProps) {
   const [shareLocation, setShareLocation] = useState(true);
   const [shareAlerts, setShareAlerts] = useState(true);
   const [shareOCR, setShareOCR] = useState(true);
@@ -31,6 +37,18 @@ export default function GuardianSettings() {
           {saved ? 'Saved!' : 'Save Settings'}
         </button>
       </div>
+
+      {liveState && (
+        <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-200/80 flex items-center justify-between text-xs">
+          <div>
+            <span className="font-bold text-slate-800">Connected Smart Glasses: </span>
+            <span className="text-slate-600 font-medium">{liveState.device.userName} (#{liveState.device.glassesId})</span>
+          </div>
+          <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-[10px]">
+            {liveState.device.networkStatus}
+          </span>
+        </div>
+      )}
 
       <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200/80 space-y-4">
         <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">

@@ -690,7 +690,7 @@ export class SpeechRecognitionHelper {
     if (text && this.active && this.callback) {
       const lower = text.toLowerCase();
       if (this.requiresWakeWord) {
-        const wakeWords = ['hey vision', 'vision', 'assistant', 'ok vision', 'hello vision'];
+        const wakeWords = [this.wakeWord, 'hey vision', 'vision', 'assistant', 'ok vision', 'hello vision'].filter(Boolean);
         const matched = wakeWords.find(w => lower.includes(w));
         if (matched) {
           const stripped = text.replace(new RegExp(`.*${matched}`, 'i'), '').trim();

@@ -4,24 +4,58 @@ import Dashboard from './components/Dashboard';
 import GuardianPortal from './components/guardian/GuardianPortal';
 
 export default function App() {
-  const [view, setView] = useState<'landing' | 'dashboard' | 'guardian'>('landing');
+  const getInitialView = (): 'landing' | 'dashboard' | 'guardian' => {
+    if (typeof window !== 'undefined') {
+      const hash = window.location.hash.toLowerCase();
+      const params = new URLSearchParams(window.location.search);
+      if (hash === '#guardian' || params.get('view') === 'guardian' || params.get('portal') === 'guardian') {
+        return 'guardian';
+      }
+      if (hash === '#dashboard' || params.get('view') === 'dashboard') {
+        return 'dashboard';
+      }
+    }
+    return 'landing';
+  };
+
+  const [view, setView] = useState<'landing' | 'dashboard' | 'guardian'>(getInitialView);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
 
   useEffect(() => {
     const handleOnline = () => setIsOffline(false);
     const handleOffline = () => setIsOffline(true);
+    const handleHash = () => {
+      const hash = window.location.hash.toLowerCase();
+      if (hash === '#guardian') setView('guardian');
+      else if (hash === '#dashboard') setView('dashboard');
+      else if (hash === '#landing' || hash === '') setView('landing');
+    };
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
+    window.addEventListener('hashchange', handleHash);
 
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('hashchange', handleHash);
     };
   }, []);
 
+  const changeView = (newView: 'landing' | 'dashboard' | 'guardian') => {
+    setView(newView);
+    if (typeof window !== 'undefined') {
+      window.location.hash = newView;
+    }
+  };
+
   if (view === 'guardian') {
-    return <GuardianPortal onExitPortal={() => setView('landing')} />;
+    return (
+      <GuardianPortal
+        onExitPortal={() => changeView('landing')}
+        onOpenGlasses={() => changeView('dashboard')}
+      />
+    );
   }
 
   return (
@@ -40,11 +74,15 @@ export default function App() {
       )}
       
       {view === 'dashboard' ? (
-        <Dashboard onExit={() => setView('landing')} isOffline={isOffline} />
+        <Dashboard
+          onExit={() => changeView('landing')}
+          onOpenGuardian={() => changeView('guardian')}
+          isOffline={isOffline}
+        />
       ) : (
         <LandingPage
-          onStartDemo={() => setView('dashboard')}
-          onOpenGuardian={() => setView('guardian')}
+          onStartDemo={() => changeView('dashboard')}
+          onOpenGuardian={() => changeView('guardian')}
         />
       )}
     </>

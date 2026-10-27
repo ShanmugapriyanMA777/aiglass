@@ -1,0 +1,128 @@
+/* VisionAssist Guardian Portal - Core CSS Design System */
+:root {
+  --primary-900: #022c1d; /* Deep Forest Green */
+  --primary-800: #064e3b; /* Mid Deep Green */
+  --primary-700: #0f766e; /* Teal Green */
+  --primary-600: #059669; /* Rich Grass Green */
+  --primary-500: #10b981; /* Bright Green */
+  --primary-100: #d1fae5; /* Soft Mint Green */
+  --primary-50: #f0fdf4;  /* Light Mint Background */
+
+  --success-700: #047857;
+  --success-600: #059669;
+  --success-500: #10b981;
+  --success-100: #d1fae5;
+  --success-50: #ecfdf5;
+
+  --warning-600: #b45309; /* Rich Dark Gold */
+  --warning-500: #d97706; /* Golden Amber */
+  --warning-100: #fef3c7; /* Light Gold */
+  --warning-50: #fffbeb;
+
+  --critical-700: #991b1b;
+  --critical-600: #dc2626;
+  --critical-500: #ef4444;
+  --critical-100: #fee2e2;
+  --critical-50: #fef2f2;
+
+  --slate-900: #042f1a; /* Very Deep Green-Black for high text contrast */
+  --slate-800: #0f172a; /* Slate Dark */
+  --slate-700: #1e293b;
+  --slate-600: #334155;
+  --slate-505: #475569;
+  --slate-400: #64748b;
+  --slate-300: #cbd5e1;
+  --slate-200: #e2e8f0;
+  --slate-100: #f1f5f9;
+  --slate-50: #f8fafc;
+  --white: #ffffff;
+
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-full: 9999px;
+
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--slate-100);
+  color: var(--slate-800);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+}
+
+a {
+  color: var(--primary-600);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+}
+
+input, select, textarea {
+  font-family: inherit;
+}
+
+.app-layout {
+  display: flex;
+  min-height: 100vh;
+}
+
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background-color: var(--slate-100);
+}
+
+.container {
+  padding: 24px;
+  max-width: 1400px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.demo-banner {
+  background: linear-gradient(90deg, #d97706, #f59e0b);
+  color: var(--white);
+  text-align: center;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.demo-badge {
+  background: rgba(255, 255, 255, 0.25);
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}

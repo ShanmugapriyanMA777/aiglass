@@ -1,76 +1,116 @@
-import { MapPin, Radio, Compass, LocateFixed } from 'lucide-react';
+import { useState } from 'react';
+import { MapPin, Radio, Compass, LocateFixed, ExternalLink } from 'lucide-react';
+import type { GuardianLiveState } from '../../lib/guardianRealtimeSync';
 
-export default function GuardianTracking() {
-  
-  // Current user GPS coords
-  const lat = 12.9716;
-  const lng = 80.2454;
-  const address = "Agni College Campus, OMR Road, Thalambur, Chennai";
+interface GuardianTrackingProps {
+  liveState: GuardianLiveState;
+}
+
+export default function GuardianTracking({ liveState }: GuardianTrackingProps) {
+  const { location, device } = liveState;
+  const lat = location.latitude || 12.9716;
+  const lng = location.longitude || 80.2454;
+  const address = location.address || 'Agni College Campus, OMR Road, Thalambur, Chennai';
+
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const delta = 0.006;
+  const mapUrl = `https://www.openstreetmap.org/export/embed.html?bbox=${(lng - delta).toFixed(5)}%2C${(lat - delta).toFixed(5)}%2C${(lng + delta).toFixed(5)}%2C${(lat + delta).toFixed(5)}&layer=mapnik&marker=${lat.toFixed(5)}%2C${lng.toFixed(5)}`;
+  const googleMapsUrl = `https://www.google.com/maps/search/?api=1&query=${lat.toFixed(6)},${lng.toFixed(6)}`;
 
   return (
     <div className="space-y-6">
+      
       {/* Map Control Bar */}
-      <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-200/80 flex flex-wrap items-center justify-between gap-4">
+      <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-200/80 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-primary-100 text-primary-600 flex items-center justify-center font-bold">
             <MapPin className="w-5 h-5" />
           </div>
           <div>
             <div className="text-sm font-extrabold text-slate-900">{address}</div>
-            <div className="text-xs text-slate-500 font-mono">Coordinates: {lat}° N, {lng}° E</div>
+            <div className="text-xs text-slate-500 font-mono mt-0.5">
+              Live Coordinates: {lat.toFixed(5)}° N, {lng.toFixed(5)}° E • Updated: {location.lastUpdated || 'Just now'}
+            </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <span className="px-3 py-1 bg-emerald-100 text-emerald-800 text-xs font-bold rounded-full flex items-center gap-1.5">
-            <Radio className="w-3.5 h-3.5 text-emerald-600 animate-pulse" /> Live GPS Signal Active
+        <div className="flex items-center gap-2.5">
+          <span className="px-3 py-1.5 bg-emerald-100 text-emerald-800 text-xs font-bold rounded-xl flex items-center gap-1.5">
+            <Radio className="w-3.5 h-3.5 text-emerald-600 animate-pulse" />
+            <span>{device.networkStatus || '4G GPS Signal Active'}</span>
           </span>
-          <button className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all flex items-center gap-1">
+
+          <button
+            onClick={() => setRefreshKey(k => k + 1)}
+            className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5"
+            title="Refresh GPS Marker"
+          >
             <LocateFixed className="w-3.5 h-3.5" /> Center Map
           </button>
+
+          <a
+            href={googleMapsUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-3.5 py-1.5 bg-primary-600 hover:bg-primary-700 text-white text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 shadow-sm"
+          >
+            <ExternalLink className="w-3.5 h-3.5" /> Open in Google Maps
+          </a>
         </div>
       </div>
 
       {/* Embedded Live Interactive Map View */}
-      <div className="bg-white rounded-3xl shadow-sm border border-slate-200/80 overflow-hidden relative min-h-[500px]">
-        {/* OpenStreetMap iframe / Canvas map view */}
+      <div className="bg-white rounded-3xl shadow-sm border border-slate-200/80 overflow-hidden relative min-h-[520px]">
         <iframe
+          key={`${lat}-${lng}-${refreshKey}`}
           title="Live User Tracking Map"
           width="100%"
-          height="520"
+          height="540"
           frameBorder="0"
           scrolling="no"
           marginHeight={0}
           marginWidth={0}
-          src={`https://www.openstreetmap.org/export/embed.html?bbox=${lng - 0.01}%2C${lat - 0.01}%2C${lng + 0.01}%2C${lat + 0.01}&layer=mapnik&marker=${lat}%2C${lng}`}
-          className="w-full h-[520px] rounded-3xl"
+          src={mapUrl}
+          className="w-full h-[540px] rounded-3xl"
         />
 
-        {/* Floating Map Overlay HUD */}
+        {/* Floating Telemetry HUD Overlay */}
         <div className="absolute top-4 left-4 bg-slate-900/90 backdrop-blur-md text-white p-4 rounded-2xl shadow-xl max-w-xs space-y-2 border border-white/10">
           <div className="flex items-center justify-between text-xs font-bold border-b border-white/10 pb-2">
-            <span className="flex items-center gap-1 text-primary-400">
+            <span className="flex items-center gap-1.5 text-primary-400">
               <Compass className="w-4 h-4" /> USER TELEMETRY
             </span>
-            <span className="text-emerald-400">● MOVING</span>
+            <span className={location.speed > 0.5 ? 'text-emerald-400' : 'text-slate-400'}>
+              ● {location.speed > 0.5 ? 'MOVING' : 'STATIONARY'}
+            </span>
           </div>
 
-          <div className="space-y-1 text-xs">
+          <div className="space-y-1.5 text-xs font-medium">
             <div className="flex justify-between">
-              <span className="text-slate-400">Current Speed:</span>
-              <span className="font-bold">3.2 km/h (Walking)</span>
+              <span className="text-slate-400">Walking Speed:</span>
+              <span className="font-bold">{location.speed} km/h</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-slate-400">Heading:</span>
-              <span className="font-bold">North-East (45°)</span>
+              <span className="text-slate-400">Bearing Heading:</span>
+              <span className="font-bold">{location.heading}°</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-slate-400">Accuracy:</span>
-              <span className="font-bold text-emerald-400">High (&lt; 2 meters)</span>
+              <span className="text-slate-400">GPS Accuracy:</span>
+              <span className="font-bold text-emerald-400">&lt; {location.accuracy || 2.0} meters</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-400">Safety Status:</span>
+              <span className={`font-bold ${
+                device.safetyStatus === 'CRITICAL' ? 'text-red-400 animate-pulse' : 'text-emerald-400'
+              }`}>
+                {device.safetyStatus}
+              </span>
             </div>
           </div>
         </div>
       </div>
+
     </div>
   );
 }

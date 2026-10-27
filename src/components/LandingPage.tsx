@@ -14,7 +14,7 @@ const features = [
   { icon: Scan, title: 'Object Detection', desc: 'Real-time identification of people, furniture, vehicles, and everyday objects with position and distance estimation.' },
   { icon: Volume2, title: 'OCR & Text Reading', desc: 'Reads books, medicine labels, notices, sign boards, and street names aloud using advanced text recognition.' },
   { icon: Eye, title: 'Scene Description', desc: 'AI-powered descriptions of indoor and outdoor environments to provide full spatial awareness and context.' },
-  { icon: Brain, title: 'Gemini AI Assistant', desc: 'Ask anything — GK questions, current affairs, general knowledge — and get instant spoken answers powered by Google Gemini.' },
+  { icon: Brain, title: 'Vision AI Assistant', desc: 'Ask anything — GK questions, current affairs, general knowledge — and get instant spoken answers powered by multimodal intelligence.' },
   { icon: MapPin, title: 'GPS Voice Navigation', desc: 'Voice-activated turn-by-turn navigation to any destination in English and regional Indian languages (Hindi, Tamil, Telugu, Kannada).' },
   { icon: Users, title: 'Face Recognition', desc: 'Register and recognize familiar faces, announcing who is nearby for social confidence.' },
   { icon: DollarSign, title: 'Currency Recognition', desc: 'Expert-level identification of all Indian currency notes (₹10 to ₹2000) with denomination-specific visual analysis.' },
@@ -27,13 +27,13 @@ const features = [
 
 
 const technologies = [
-  { icon: Brain, name: 'Google Gemini 2.5 Flash', desc: 'Powers AI Q&A, scene understanding, OCR, and currency detection via OpenRouter' },
+  { icon: Brain, name: 'Neural Vision Engine', desc: 'Powers AI Q&A, scene understanding, OCR, and currency detection' },
   { icon: Scan, name: 'COCO-SSD / YOLO v8', desc: 'In-browser & server-side real-time object detection with distance estimation' },
   { icon: Camera, name: 'WebRTC', desc: 'Live webcam streaming as the glasses camera with frame capture' },
   { icon: Volume2, name: 'Web Speech API', desc: 'Continuous speech recognition with silence debounce + multilingual TTS output' },
   { icon: MapPin, name: 'OpenStreetMap + OSRM', desc: 'Free open-source GPS navigation with walking route planning and turn-by-turn steps' },
   { icon: Database, name: 'Supabase', desc: 'Cloud database for detection history, settings sync, and edge function AI calls' },
-  { icon: Cpu, name: 'FastAPI Python Backend', desc: 'Local server for YOLO, EasyOCR, traffic light CV, and Gemini Q&A fallback' },
+  { icon: Cpu, name: 'FastAPI Python Backend', desc: 'Local server for YOLO, EasyOCR, traffic light CV, and Intelligent Q&A fallback' },
   { icon: Code2, name: 'Modular Architecture', desc: 'Ready for Raspberry Pi camera & sensor swap with no AI logic changes' },
 ];
 
@@ -73,10 +73,11 @@ export default function LandingPage({ onStartDemo, onOpenGuardian }: LandingPage
           <div className="flex items-center gap-3">
             <button
               type="button"
-              onClick={onOpenGuardian || (() => window.open('/visionassist-guardian/login.html', '_blank'))}
-              className="px-4 py-2 rounded-xl border border-slate-200 text-slate-700 font-medium text-sm hover:border-primary-500 hover:text-primary-600 transition-all"
+              onClick={onOpenGuardian || (() => { window.location.hash = 'guardian'; })}
+              className="px-4 py-2 rounded-xl border border-slate-200 text-slate-700 font-medium text-sm hover:border-primary-500 hover:text-primary-600 transition-all flex items-center gap-1.5"
             >
-              Guardian Login
+              <Shield className="w-4 h-4 text-primary-600" />
+              <span>Guardian Portal</span>
             </button>
             <button
               onClick={onStartDemo}
@@ -160,7 +161,7 @@ export default function LandingPage({ onStartDemo, onOpenGuardian }: LandingPage
                   </div>
                 </div>
                 <div className="space-y-3">
-                  {['Gemini AI Q&A', 'GPS Navigation', 'Currency Detection', 'Voice Commands', 'Object Detection', 'Scene Description'].map((item, i) => (
+                  {['Vision AI Q&A', 'GPS Navigation', 'Currency Detection', 'Voice Commands', 'Object Detection', 'Scene Description'].map((item, i) => (
                     <motion.div
                       key={item}
                       initial={{ opacity: 0, x: -20 }}
@@ -193,7 +194,7 @@ export default function LandingPage({ onStartDemo, onOpenGuardian }: LandingPage
           >
             <h2 className="text-4xl font-bold mb-4">AI Features That Empower</h2>
             <p className="text-lg text-slate-600 max-w-2xl mx-auto">
-              Twelve powerful AI capabilities — from Gemini-powered Q&A to GPS navigation — all accessible by voice.
+              Twelve powerful AI capabilities — from intelligent voice Q&A to GPS navigation — all accessible by voice.
             </p>
           </motion.div>
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">

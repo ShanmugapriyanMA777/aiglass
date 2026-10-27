@@ -1008,6 +1008,7 @@ async def command_parser_endpoint(req: CommandRequest):
     nav_patterns = [
         r'(?:take me to|navigate to|directions to|route to|how do i get to|how do i reach|how can i get to|show me the way to|show me directions to|i need to go to|i want to go to|guide me to|walk me to|drive me to)\s+(.+)',
         r'(?:go to)\s+(.+)',
+        r'(?:set\s+destination\s+to|change\s+destination\s+to|switch\s+destination\s+to|start\s+(?:the\s+)?destination\s+(?:to)?|my\s+destination\s+is|destination\s+(?:is|to)?)\s+(.+)',
         r'(.+?)\s+(?:directions|route)$'
     ]
     for pattern in nav_patterns:
@@ -2083,6 +2084,29 @@ async def get_guardian_status():
         "alerts": ALERTS_STORE,
         "activity": ACTIVITY_LOGS
     }
+
+class GuardianSyncPayload(BaseModel):
+    device: Optional[Dict[str, Any]] = None
+    location: Optional[Dict[str, Any]] = None
+    navigation: Optional[Dict[str, Any]] = None
+    alerts: Optional[List[Dict[str, Any]]] = None
+    activities: Optional[List[Dict[str, Any]]] = None
+    stats: Optional[Dict[str, Any]] = None
+
+@app.post("/api/guardian/sync")
+async def sync_guardian_state(payload: GuardianSyncPayload):
+    global DEVICE_STATUS_STORE, LOCATION_STORE, NAVIGATION_STORE, ALERTS_STORE, ACTIVITY_LOGS
+    if payload.device:
+        DEVICE_STATUS_STORE.update(payload.device)
+    if payload.location:
+        LOCATION_STORE.update(payload.location)
+    if payload.navigation:
+        NAVIGATION_STORE.update(payload.navigation)
+    if payload.alerts is not None:
+        ALERTS_STORE = payload.alerts
+    if payload.activities is not None:
+        ACTIVITY_LOGS = payload.activities
+    return {"success": True, "message": "Synced"}
 
 @app.post("/api/guardian/sos")
 async def trigger_sos_alert():

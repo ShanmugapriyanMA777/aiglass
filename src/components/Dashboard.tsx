@@ -15,6 +15,13 @@ import { analyzeFrame, drawBoundingBoxes, getLocalModel, type VisionResult, askG
 import { stopSpeaking, configureSpeech, SpeechRecognitionHelper, isSpeaking } from '../lib/speech';
 import { supabase, type AppSettings, type EmergencyContact, type DetectionRecord, type ActivityLogEntry, type DetectionType } from '../lib/supabase';
 import { syncAIActivity, syncAlert, syncLocation } from '../lib/guardianSync';
+import {
+  publishLocation,
+  publishDeviceStatus,
+  publishNavigation,
+  publishAlert,
+  publishActivity
+} from '../lib/guardianRealtimeSync';
 import { LocationEngine, type TrustedLocation } from '../lib/LocationEngine';
 import { GpsDiagnosticsModal } from './GpsDiagnosticsModal';
 import MapPanel from './MapPanel';
@@ -25,6 +32,7 @@ import { navigationService, parseNavigationIntent } from '../navigation';
 
 interface DashboardProps {
   onExit: () => void;
+  onOpenGuardian?: () => void;
   isOffline?: boolean;
 }
 
@@ -39,7 +47,7 @@ interface HistoryEntry {
   action: string;
 }
 
-export default function Dashboard({ onExit, isOffline = false }: DashboardProps) {
+export default function Dashboard({ onExit, onOpenGuardian, isOffline = false }: DashboardProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -131,7 +139,6 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
   
   // AI Companion States
   const [aiHistory, setAiHistory] = useState<Array<{role: string, content: string}>>([]);
-  const [lastInteractionTime, setLastInteractionTime] = useState<number>(Date.now());
   const [aiMood, setAiMood] = useState<'Calm' | 'Alert' | 'Thinking' | 'Speaking'>('Calm');
   const [aiConfidence] = useState<number>(100);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -195,15 +202,48 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       setCurrentCoords([loc.latitude, loc.longitude]);
       if (loc.speed !== null) setSpeedMps(loc.speed);
       setGpsStatus('active');
+      publishLocation(
+        loc.latitude,
+        loc.longitude,
+        currentRoadName || '',
+        (loc.speed || 0) * 3.6,
+        loc.heading || 0
+      );
     });
 
     return () => {
       unsubscribe();
     };
-  }, []);
+  }, [currentRoadName]);
 
-  const awaitingCommandRef = useRef(false);
-  const commandTimeoutRef = useRef<number | null>(null);
+  // Synchronize live device health and sensor telemetry to Guardian Portal
+  useEffect(() => {
+    publishDeviceStatus({
+      cameraActive: cameraOn,
+      micActive: true,
+      gpsActive: gpsStatus === 'active',
+      aiActive: true,
+      battery: batteryLevel,
+      isOnline: !isOffline,
+    });
+  }, [cameraOn, gpsStatus, batteryLevel, isOffline]);
+
+  // Synchronize active navigation HUD with Guardian Portal
+  useEffect(() => {
+    if (navActive && navDestination) {
+      publishNavigation(
+        true,
+        navDestination,
+        distanceRemaining ? `${distanceRemaining} m` : '',
+        etaMinutes || 0,
+        routeSteps[navStep]?.instruction || ''
+      );
+    } else if (!navActive) {
+      publishNavigation(false, '', '', 0, '');
+    }
+  }, [navActive, navDestination, distanceRemaining, etaMinutes, navStep, routeSteps]);
+
+  const awaitingDestinationRef = useRef(false);
   const lastFoundNearestCoords = useRef<[number, number] | null>(null);
   const lastFoundNearestName = useRef<string>('');
   const lastSpokenObstaclesRef = useRef<Record<string, { distanceMeters: number; position: string; timestamp: number }>>({});
@@ -596,14 +636,23 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
   const startRouteNavigation = useCallback(async (destinationName: string) => {
     if (!destinationName) return;
     setError('');
-    speakIfNotMuted(`Got it. I'm finding the best walking route to ${destinationName} for you.`);
-    addHistory('navigation', destinationName, null, 'Searching route');
+    const cleanDest = destinationName.trim().replace(/[.?!]+$/, '');
+    setNavDestination(cleanDest);
+
+    // Immediately scroll directly to the live Map HUD
+    const mapEl = document.getElementById('live-map-section');
+    if (mapEl) {
+      mapEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    speakIfNotMuted(`Got it. Finding the best walking route to ${cleanDest} for you.`);
+    addHistory('navigation', cleanDest, null, 'Searching route');
     
     try {
       const baseLat = currentCoords ? currentCoords[0] : 12.9716;
       const baseLon = currentCoords ? currentCoords[1] : 80.2454;
       
-      const places = await searchPlaces(destinationName, baseLat, baseLon);
+      const places = await searchPlaces(cleanDest, baseLat, baseLon);
       if (places.length === 0) {
         throw new Error('Location not found');
       }
@@ -625,9 +674,24 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       setNavStep(0);
       setSimulatedLoc(start);
       setCurrentRoadName(route.steps[0]?.instruction || 'Start walking');
+
+      // Generate Google Maps URL
+      let mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(cleanDest)}&travelmode=walking&dir_action=navigate`;
+      if (start && !isNaN(start[0]) && !isNaN(start[1])) {
+        mapsUrl += `&origin=${start[0].toFixed(6)},${start[1].toFixed(6)}`;
+      }
+      setBlockedPopupUrl(mapsUrl);
+      setBlockedDestination(cleanDest);
+
+      // Attempt to launch Google Maps in new tab
+      try {
+        window.open(mapsUrl, '_blank', 'noopener,noreferrer');
+      } catch (popupErr) {
+        console.warn('Google Maps popup could not open automatically:', popupErr);
+      }
       
       const firstInstruction = route.steps[0]?.instruction || 'Walk forward';
-      speakIfNotMuted(`We are ready to go! ${firstInstruction}`);
+      speakIfNotMuted(`We are ready to go! Starting walking navigation to ${destination.name.split(',')[0]}. ${firstInstruction}`);
       addHistory('navigation', destination.name.split(',')[0], null, 'Active');
     } catch (err) {
       console.error('Failed to plan navigation route:', err);
@@ -667,47 +731,16 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
   }, [currentCoords, speakIfNotMuted, addHistory]);
 
   // AI Voice Navigation Handler with Google Maps URL Generation
-  const handleNavigation = useCallback((destination: string, originCoords?: [number, number] | null) => {
+  const handleNavigation = useCallback((destination: string) => {
     if (!destination || !destination.trim()) {
+      awaitingDestinationRef.current = true;
       speakIfNotMuted("Where would you like to go?");
       setVoiceMessage("Where would you like to go?");
       return;
     }
-
-    const cleanDest = destination.trim();
-    let mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(cleanDest)}&travelmode=walking&dir_action=navigate`;
-    
-    // Optional origin if browser geolocation coordinates are available
-    const origin = originCoords || currentCoords;
-    if (origin && Array.isArray(origin) && !isNaN(origin[0]) && !isNaN(origin[1])) {
-      mapsUrl += `&origin=${origin[0].toFixed(6)},${origin[1].toFixed(6)}`;
-    }
-
-    const spokenMsg = `Opening Google Maps walking navigation for ${cleanDest}...`;
-    speakIfNotMuted(spokenMsg);
-    setVoiceMessage(`Opening Google Maps walking navigation for ${cleanDest}...`);
-    setLastAiResponse(spokenMsg);
-    setLastAiTool('Google Maps Walking Navigation');
-
-    addHistory('navigation', cleanDest, 0.99, 'Google Maps');
-
-    // Automatically open Google Maps in a new browser tab/window
-    try {
-      const newWin = window.open(mapsUrl, '_blank', 'noopener,noreferrer');
-      if (!newWin || newWin.closed || typeof newWin.closed === 'undefined') {
-        console.warn('Google Maps popup blocked by browser policy.');
-        setBlockedPopupUrl(mapsUrl);
-        setBlockedDestination(cleanDest);
-      } else {
-        setBlockedPopupUrl(null);
-        setBlockedDestination('');
-      }
-    } catch (popupErr) {
-      console.warn('Error opening Google Maps window:', popupErr);
-      setBlockedPopupUrl(mapsUrl);
-      setBlockedDestination(cleanDest);
-    }
-  }, [currentCoords, speakIfNotMuted, addHistory]);
+    awaitingDestinationRef.current = false;
+    startRouteNavigation(destination);
+  }, [speakIfNotMuted, startRouteNavigation]);
 
   // Simulated deviation helper
   const simulateDeviation = useCallback(() => {
@@ -959,7 +992,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       const personObj = streetObjects.find((o) => o.class === 'person');
       if (personObj) {
         const posText = personObj.position === 'center' ? 'in front of you' : `on your ${personObj.position}`;
-        speakIfNotMuted(`A person is detected ${posText} about ${personObj.distanceMeters} meters away.`);
+        speakIfNotMuted(`A person is detected ${posText} about ${personObj.distance_meters} meters away.`);
         addHistory('face', 'Person detected', null, `${posText}`);
       } else {
         speakIfNotMuted('No person detected in front of the camera.');
@@ -1040,6 +1073,8 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         } catch (e) {
           console.warn('Failed to log SOS activity to Supabase:', e);
         }
+        publishAlert('EMERGENCY SOS ALERT', message, 'CRITICAL', latitude, longitude);
+        publishActivity('sos', 'Emergency SOS Activated', message);
         setSosSent(true);
         speakIfNotMuted('Emergency activated. Location shared. Calling emergency contact.');
 
@@ -1320,7 +1355,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     setVoiceMessage("Analyzing camera view...");
 
     const detectedList = streetObjects.length > 0 
-      ? `Live camera detected objects: ` + streetObjects.map(o => `${o.class} (${o.position}, distance ${o.distanceMeters}m)`).join(', ')
+      ? `Live camera detected objects: ` + streetObjects.map(o => `${o.class} (${o.position}, distance ${o.distance_meters}m)`).join(', ')
       : 'Live camera view: pathway is clear, no obstacles or objects detected.';
 
     try {
@@ -1362,7 +1397,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     setVoiceMessage(`Looking through camera: "${question}"...`);
 
     const detectedList = streetObjects.length > 0 
-      ? `Live camera detected objects: ` + streetObjects.map(o => `${o.class} (${o.position}, distance ${o.distanceMeters}m)`).join(', ')
+      ? `Live camera detected objects: ` + streetObjects.map(o => `${o.class} (${o.position}, distance ${o.distance_meters}m)`).join(', ')
       : 'Live camera view: clear open path, no obstacles or objects detected.';
 
     try {
@@ -1440,6 +1475,49 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
 
     console.log(`Command processed: "${transcript}" -> "${normalizedCmd}"`);
 
+    // If waiting for a destination answer
+    if (awaitingDestinationRef.current) {
+      awaitingDestinationRef.current = false;
+      const cleanDest = transcript
+        .replace(/^(?:i want to go to|take me to|navigate to|go to|directions to|route to|to)\s+/i, '')
+        .trim()
+        .replace(/[.?!]+$/, '');
+      if (cleanDest && cleanDest.length > 1) {
+        handleNavigation(cleanDest);
+        return;
+      }
+    }
+
+    // Direct destination commands: e.g. "destination Marina Beach", "set destination to Hospital", "my destination is Central"
+    const directDestMatch = transcript.match(/^(?:please\s+)?(?:set\s+destination\s+(?:to\s+)?|start\s+(?:the\s+)?destination\s+(?:to\s+)?|my\s+destination\s+is\s+|destination\s+(?:is\s+|to\s+)?)\s*(.+)$/i);
+    if (directDestMatch && directDestMatch[1]) {
+      const destTarget = directDestMatch[1].trim().replace(/[.?!]+$/, '');
+      if (destTarget) {
+        handleNavigation(destTarget);
+        return;
+      }
+    }
+
+    // Explicit "open maps" / "go to maps" / "show map" command
+    if (
+      normalizedCmd === 'open maps' ||
+      normalizedCmd === 'go to maps' ||
+      normalizedCmd === 'show maps' ||
+      normalizedCmd === 'show map' ||
+      normalizedCmd === 'maps' ||
+      normalizedCmd === 'open map' ||
+      normalizedCmd === 'open google maps'
+    ) {
+      const mapEl = document.getElementById('live-map-section');
+      if (mapEl) {
+        mapEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      speakIfNotMuted("Opening maps. Where would you like to go?");
+      setVoiceMessage("Showing map. Where would you like to go?");
+      awaitingDestinationRef.current = true;
+      return;
+    }
+
     // -------------------------------------------------------------
     // AI GROQ COMMAND PARSER (Voice Navigation & Intent Classification)
     // -------------------------------------------------------------
@@ -1460,6 +1538,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
           setAiMood('Calm');
 
           if (parsed.needs_clarification || !parsed.destination || !parsed.destination.trim()) {
+            awaitingDestinationRef.current = true;
             speakIfNotMuted("Where would you like to go?");
             setVoiceMessage("Where would you like to go?");
             return;
@@ -1586,7 +1665,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         'amazon': { name: 'Amazon', url: 'https://www.amazon.com' },
         'calculator': { name: 'Calculator', url: 'https://www.google.com/search?q=calculator' },
         'weather': { name: 'Weather', url: 'https://weather.com' },
-        'chatgpt': { name: 'ChatGPT', url: 'https://chatgpt.com' },
+        'assistant': { name: 'AI Assistant', url: 'https://chatgpt.com' },
         'reddit': { name: 'Reddit', url: 'https://www.reddit.com' },
         'github': { name: 'GitHub', url: 'https://github.com' },
         'wikipedia': { name: 'Wikipedia', url: 'https://www.wikipedia.org' },
@@ -1600,6 +1679,18 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
           window.open(val.url, '_blank', 'noopener,noreferrer');
           return;
         }
+      }
+
+      // If user said "go to [place]" or "start destination [place]", handle as destination navigation
+      if (
+        normalizedCmd.startsWith('go to ') ||
+        normalizedCmd.startsWith('start destination') ||
+        normalizedCmd.startsWith('take me to ') ||
+        normalizedCmd.startsWith('navigate to ') ||
+        normalizedCmd.startsWith('destination ')
+      ) {
+        handleNavigation(appQuery);
+        return;
       }
 
       // Generic URL or search fallback
@@ -1639,6 +1730,9 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
     const isNavigateKeyword = 
       parsedNav.intent !== 'UNKNOWN' ||
       normalizedCmd.includes('navigate') || 
+      normalizedCmd.includes('destination') ||
+      normalizedCmd.includes('start destination') ||
+      normalizedCmd.includes('set destination') ||
       normalizedCmd.includes('take me to') || 
       normalizedCmd.includes('go to') ||
       normalizedCmd.includes('how do i get to') ||
@@ -1666,6 +1760,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       setRouteSteps([]);
       setSimulatedLoc(null);
       setIsSimulatingWalk(false);
+      setBlockedPopupUrl(null);
       addHistory('navigation', 'Stopped', null, 'Cancelled');
       return;
     } else if (parsedNav.intent === 'WHERE_AM_I' || normalizedCmd.includes('where am i') || normalizedCmd.includes('current location') || normalizedCmd.includes('where i am')) {
@@ -1688,11 +1783,13 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
       // Fallback navigation handler if Groq was offline/unreachable
       const cleanTarget = transcript
         .replace(/^(hey vision|vision|please|can you|could you|i need to|i want to)\s+/i, '')
-        .replace(/^(navigate to|take me to|show me directions to|give me the route to|directions to|how do i get to|how do i reach|route to|go to|show me the way to)\s+/i, '')
-        .trim();
+        .replace(/^(navigate to|navigate|take me to|show me directions to|give me the route to|directions to|how do i get to|how do i reach|route to|go to|show me the way to|destination to|destination is|destination|start destination to|start destination|set destination to|my destination is)\s+/i, '')
+        .trim()
+        .replace(/[.?!]+$/, '');
       if (cleanTarget) {
         handleNavigation(cleanTarget);
       } else {
+        awaitingDestinationRef.current = true;
         speakIfNotMuted("Where would you like to go?");
         setVoiceMessage("Where would you like to go?");
       }
@@ -1881,7 +1978,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         if (answer) {
           setVoiceMessage(answer);
           speakIfNotMuted(answer);
-          addHistory('gemini', transcript, null, answer.slice(0, 60));
+          addHistory('ai_query', transcript, null, answer.slice(0, 60));
           setAiHistory(prev => [...prev, {role: 'user', content: transcript}, {role: 'model', content: answer}].slice(-10));
         }
         setAiMood('Calm');
@@ -1892,9 +1989,6 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
         setAiMood('Calm');
       }
     }
-    
-    // Update interaction time
-    setLastInteractionTime(Date.now());
   }, [
     currentCoords, settings, simulatedLoc, navActive, currentRoadName, batteryLevel,
     distanceRemaining, etaMinutes, routeCoords, routeSteps, navStep, cameraOn,
@@ -2150,6 +2244,14 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
                 title="Switch Language (English / தமிழ்)"
               >
                 🌐 {settings.voice_lang?.startsWith('ta') ? 'தமிழ்' : 'EN'}
+              </button>
+              <button
+                onClick={onOpenGuardian || (() => { window.location.hash = 'guardian'; })}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 transition-colors text-xs font-bold text-slate-700 shadow-sm"
+                title="Open Guardian Caregiver Portal"
+              >
+                <Shield className="w-4 h-4 text-primary-600" />
+                <span className="hidden sm:inline">Guardian Portal</span>
               </button>
               <button onClick={() => setView('admin')} className="p-2 rounded-lg hover:bg-slate-100 transition-colors" title="Admin">
                 <BarChart3 className="w-5 h-5 text-slate-600" />
@@ -2533,7 +2635,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
                   </div>
                   <div>
                     <h3 className="font-bold text-sm tracking-wide text-white">Multimodal Vision & Wolfram|Alpha</h3>
-                    <p className="text-[10px] text-slate-400">Gemini 2.5 Flash + Computational Intelligence</p>
+                    <p className="text-[10px] text-slate-400">Neural Vision + Computational Intelligence</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-1.5 text-[10px] font-bold">
@@ -2607,7 +2709,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
             </div>
 
             {/* Live Navigation Card */}
-            <div className="bg-white rounded-2xl card-shadow border border-slate-100 p-4 space-y-3">
+            <div id="live-map-section" className={`bg-white rounded-2xl card-shadow border transition-all duration-300 p-4 space-y-3 ${navActive ? 'ring-2 ring-primary-500/80 border-primary-200 shadow-lg' : 'border-slate-100'}`}>
               <div className="flex items-center justify-between">
                 <h3 className="font-semibold text-slate-700 flex items-center gap-2">
                   <Navigation className="w-5 h-5 text-primary-600 animate-pulse" /> Live Navigation
@@ -2652,6 +2754,7 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
                       setRouteSteps([]);
                       setSimulatedLoc(null);
                       setIsSimulatingWalk(false);
+                      setBlockedPopupUrl(null);
                       speakIfNotMuted('Navigation stopped.');
                     }}
                     className="px-4 py-2 bg-error-500 text-white text-sm font-semibold rounded-xl hover:bg-error-600 transition-colors"
@@ -2660,6 +2763,21 @@ export default function Dashboard({ onExit, isOffline = false }: DashboardProps)
                   </button>
                 )}
               </div>
+
+              {/* Google Maps External Quick Link if active or URL available */}
+              {(navActive || blockedPopupUrl) && (
+                <div className="pt-1">
+                  <a
+                    href={blockedPopupUrl || `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(navDestination || 'destination')}&travelmode=walking&dir_action=navigate`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="w-full py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-medium text-xs rounded-xl flex items-center justify-center gap-1.5 transition shadow-sm"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    Open in Google Maps App / Tab
+                  </a>
+                </div>
+              )}
 
               {/* Real-time Distance, ETA, Road instructions HUD */}
               {navActive && (
@@ -3355,7 +3473,7 @@ function AdminView({ onBack, history, fps }: { onBack: () => void; history: Hist
                 </div>
                 <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50">
                   <span className="text-sm text-slate-600">AI Engine</span>
-                  <span className="text-sm font-semibold text-success-600">Gemini 2.5 Flash</span>
+                  <span className="text-sm font-semibold text-success-600">Neural Vision Engine</span>
                 </div>
                 <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50">
                   <span className="text-sm text-slate-600">Analysis Interval</span>
@@ -3736,20 +3854,20 @@ function SettingsView({ onBack, settings, setSettings, contacts, setContacts, re
             </div>
           </div>
 
-          {/* AI API Configuration */}
+          {/* Cloud AI Intelligence Configuration */}
           <div className="bg-white rounded-2xl p-6 card-shadow border border-slate-100">
             <h3 className="font-bold text-slate-700 mb-4 flex items-center gap-2">
-              <Brain className="w-5 h-5 text-primary-600" /> AI API Configuration
+              <Brain className="w-5 h-5 text-primary-600" /> Cloud AI Intelligence
             </h3>
             <div className="space-y-4">
               <div>
                 <label className="text-sm font-medium text-slate-600 block mb-2">
-                  OpenRouter API Key
+                  Cloud Intelligence Access Token
                 </label>
                 <div className="relative">
                   <input
                     type="password"
-                    placeholder="Enter sk-or-..."
+                    placeholder="Enter access token..."
                     value={openRouterKey}
                     onChange={(e) => setOpenRouterKey(e.target.value)}
                     className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-primary-300 focus:outline-none"
@@ -3757,8 +3875,8 @@ function SettingsView({ onBack, settings, setSettings, contacts, setContacts, re
                 </div>
                 <span className="text-xs text-slate-400 mt-1 block">
                   {isKeyConfigured
-                    ? "✓ API Key is currently configured in the database. Enter a new key to overwrite it."
-                    : "No API Key configured. The system will fall back to local client-side analysis."}
+                    ? "✓ Cloud intelligence access token is active. Enter a new token to update."
+                    : "No token configured. The system will use local on-device neural processing."}
                 </span>
               </div>
             </div>

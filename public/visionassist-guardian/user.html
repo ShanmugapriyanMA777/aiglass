@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Authorized User Management - VisionAssist Guardian Portal</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/dashboard.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/responsive.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/supabase.js"></script>
+  <script src="js/auth.js"></script>
+</head>
+<body>
+
+  <div class="app-layout">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-title">Guardian Portal</div>
+      </div>
+      <nav class="sidebar-nav">
+        <a href="dashboard.html" class="nav-item">Dashboard</a>
+        <a href="user.html" class="nav-item active">Authorized User</a>
+        <a href="tracking.html" class="nav-item">Live GPS Tracking</a>
+        <a href="alerts.html" class="nav-item">Safety & SOS Alerts</a>
+        <a href="activity.html" class="nav-item">AI Activity & OCR</a>
+        <a href="reports.html" class="nav-item">Daily Reports</a>
+        <a href="settings.html" class="nav-item">Settings</a>
+      </nav>
+      <div class="sidebar-footer">
+        <button id="logout-btn" class="btn" style="width:100%; color:white; border: 1px solid rgba(255,255,255,0.3); background: transparent;">Sign Out</button>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="top-header">
+        <h2>Authorized User Linking</h2>
+      </header>
+
+      <div class="container">
+        <div class="card col-12">
+          <div class="card-header">
+            <span class="card-title">Linked VisionAssist User Account</span>
+            <span class="status-pill safe">AUTHORIZED & LINKED</span>
+          </div>
+
+          <div style="display: flex; gap: 24px; align-items: center; margin-top: 12px;">
+            <div class="avatar-circle" style="width:64px; height:64px; font-size:24px;">R</div>
+            <div>
+              <h3 style="font-size: 20px; font-weight: 800;">Rahul</h3>
+              <p style="font-size: 13px; color: var(--slate-500);">Primary VisionAssist Smart Glasses User</p>
+              <p style="font-size: 12px; color: var(--primary-600); font-weight: 600; margin-top: 4px;">Relationship: Parent / Guardian (Approved)</p>
+            </div>
+          </div>
+
+          <div style="margin-top: 24px; border-top: 1px solid var(--slate-200); padding-top: 16px;">
+            <h4 style="font-size: 14px; font-weight: 700; color: var(--slate-700);">Link Another User</h4>
+            <div style="display: flex; gap: 12px; margin-top: 10px; max-width: 480px;">
+              <input type="text" placeholder="Enter User Pairing Code (e.g. VG-8842)" style="flex:1; padding: 10px; border-radius: var(--radius-md); border: 1px solid var(--slate-300);">
+              <button class="btn btn-primary">Link Account</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+</body>
+</html>

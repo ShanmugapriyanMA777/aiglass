@@ -78,7 +78,7 @@ export function extractDestination(query: string): string {
     /^(?:take\s+me\s+to|navigate\s+(?:me\s+)?to|guide\s+me\s+to|directions?\s+to|route\s+to|go\s+to|drive\s+me\s+to|walk\s+me\s+to|bring\s+me\s+to|head\s+to|lead\s+me\s+to)\s+/i,
     /^how\s+(?:do|can)\s+i\s+get\s+to\s+/i,
     /^(?:i\s+want\s+to\s+go\s+to|i\s+need\s+to\s+go\s+to|i\s+would\s+like\s+to\s+go\s+to)\s+/i,
-    /^(?:change\s+destination\s+to|set\s+destination\s+to|switch\s+destination\s+to)\s+/i,
+    /^(?:change\s+destination\s+to|set\s+destination\s+to|switch\s+destination\s+to|start\s+(?:the\s+)?destination\s+(?:to\s+)?|destination\s+(?:is\s+|to\s+)?|my\s+destination\s+is\s+)\s*/i,
     /^(?:find\s+way\s+to|show\s+(?:me\s+)?(?:the\s+)?way\s+to)\s+/i,
   ];
 
@@ -232,6 +232,9 @@ export function parseNavigationIntent(query: string, defaultMode: TravelMode = '
     /\b(?:i\s+want\s+to\s+go\s+to)\b/i,
     /\b(?:take\s+me\s+home)\b/i,
     /\b(?:go\s+home)\b/i,
+    /\b(?:destination)\b/i,
+    /\b(?:start\s+(?:the\s+)?destination)\b/i,
+    /\b(?:set\s+destination)\b/i,
   ];
 
   const hasNavTrigger = navTriggers.some((t) => t.test(raw));

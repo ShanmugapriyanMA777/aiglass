@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live GPS Tracking - VisionAssist Guardian Portal</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/dashboard.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/responsive.css">
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/supabase.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/tracking.js"></script>
+  <script src="js/realtime.js"></script>
+</head>
+<body>
+
+  <div class="app-layout">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-title">Guardian Portal</div>
+      </div>
+      <nav class="sidebar-nav">
+        <a href="dashboard.html" class="nav-item">Dashboard</a>
+        <a href="tracking.html" class="nav-item active">Live GPS Tracking</a>
+        <a href="alerts.html" class="nav-item">Safety & SOS Alerts</a>
+        <a href="activity.html" class="nav-item">AI Activity & OCR</a>
+        <a href="reports.html" class="nav-item">Daily Reports</a>
+        <a href="settings.html" class="nav-item">Settings</a>
+      </nav>
+      <div class="sidebar-footer">
+        <button id="logout-btn" class="btn" style="width:100%; color:white; border: 1px solid rgba(255,255,255,0.3); background: transparent;">Sign Out</button>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="top-header">
+        <h2>Real-Time Live GPS Map & Path Tracking</h2>
+      </header>
+
+      <div class="container">
+        <div class="card col-12">
+          <div class="card-header">
+            <span class="card-title">Live Tracking HUD (Leaflet & OpenStreetMap)</span>
+            <span class="status-pill safe">REALTIME STREAM ACTIVE</span>
+          </div>
+
+          <div id="map-element" class="map-container" style="height: 520px;"></div>
+
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 16px; text-align: center;">
+            <div style="background: var(--slate-50); padding: 12px; border-radius: var(--radius-md);">
+              <div style="font-size: 11px; color: var(--slate-500); font-weight:700;">GPS ACCURACY</div>
+              <div style="font-size: 16px; font-weight: 800; color: var(--slate-800);">±3.2 meters</div>
+            </div>
+            <div style="background: var(--slate-50); padding: 12px; border-radius: var(--radius-md);">
+              <div style="font-size: 11px; color: var(--slate-500); font-weight:700;">CURRENT SPEED</div>
+              <div style="font-size: 16px; font-weight: 800; color: var(--slate-800);">1.2 m/s (Walking)</div>
+            </div>
+            <div style="background: var(--slate-50); padding: 12px; border-radius: var(--radius-md);">
+              <div style="font-size: 11px; color: var(--slate-500); font-weight:700;">PATH POLYLINE</div>
+              <div style="font-size: 16px; font-weight: 800; color: var(--primary-600);">Active Stream</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+</body>
+</html>
